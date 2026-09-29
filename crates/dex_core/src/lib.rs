@@ -21,6 +21,8 @@
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 
+pub mod book;
+
 /// Minor units of UNIT-A in one tradable lot (1.00 A).
 pub const LOT_SIZE_A: u64 = 100;
 
