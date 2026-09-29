@@ -18,7 +18,8 @@
 use dex_core::{execute_run, select_parks, ParkInput, RunInput};
 use hdk::prelude::*;
 use ledger_api::{
-    BalanceView, EscrowState, ParkFill, ParkRequest, PendingPark, RunEscrowInput, RunReport,
+    BalanceView, EscrowState, ParkFill, ParkRequest, ParkSettlement, ParkStatus, PendingPark,
+    RunEscrowInput, RunReport,
 };
 use ledger_integrity::*;
 use std::collections::BTreeSet;
@@ -180,11 +181,13 @@ pub fn get_escrow_state(escrow: ActionHash) -> ExternResult<EscrowState> {
     // were returned to the maker, not sold, so they don't count as filled.
     let mut locked = entry.terms.initial_lock().map_err(core_err)?;
     let mut unfilled_at_release = None;
-    for (_, run) in &runs {
-        if run.mode == RunMode::Release && unfilled_at_release.is_none() {
+    let mut released_at = None;
+    for r in &runs {
+        if r.run.mode == RunMode::Release && unfilled_at_release.is_none() {
             unfilled_at_release = Some(entry.terms.remaining_lots(&locked).map_err(core_err)?);
+            released_at = Some(r.at);
         }
-        locked = run.locked;
+        locked = r.run.locked;
     }
     let remaining_lots = entry.terms.remaining_lots(&locked).map_err(core_err)?;
     let unfilled = unfilled_at_release.unwrap_or(remaining_lots);
@@ -200,6 +203,7 @@ pub fn get_escrow_state(escrow: ActionHash) -> ExternResult<EscrowState> {
         runs: runs.len(),
         expired: entry.terms.is_expired_at(sys_time()?.as_micros()),
         closed: released,
+        released_at,
     })
 }
 
@@ -208,7 +212,7 @@ pub fn get_escrow_state(escrow: ActionHash) -> ExternResult<EscrowState> {
 pub fn get_pending_parks(escrow: ActionHash) -> ExternResult<Vec<PendingPark>> {
     let consumed: BTreeSet<ActionHash> = escrow_runs(&escrow)?
         .into_iter()
-        .flat_map(|(_, r)| r.consumed)
+        .flat_map(|r| r.run.consumed)
         .collect();
     let mut parks = pending_park_inputs(&escrow, &consumed)?;
     parks.sort_by(|x, y| (x.parked_at, &x.id).cmp(&(y.parked_at, &y.id)));
@@ -222,6 +226,35 @@ pub fn get_pending_parks(escrow: ActionHash) -> ExternResult<Vec<PendingPark>> {
             parked_at: Timestamp::from_micros(p.parked_at),
         })
         .collect())
+}
+
+/// Parks the caller has placed, newest first, with how each resolved.
+#[hdk_extern]
+pub fn get_my_parks() -> ExternResult<Vec<ParkStatus>> {
+    let mut out = Vec::new();
+    for record in query(ChainQueryFilter::new().include_entries(true))?.into_iter().rev() {
+        let Some(EntryTypes::Park(park)) = decode_record(&record)? else {
+            continue;
+        };
+        let hash = record.action_address().clone();
+        let runs = escrow_runs(&park.escrow)?;
+        let settlement = match runs.iter().find(|r| r.run.consumed.contains(&hash)) {
+            Some(consuming) => Some(ParkSettlement {
+                run: consuming.hash.clone(),
+                filled_lots: replay_fill(&park.escrow, &runs, consuming, &hash)?,
+            }),
+            None => None,
+        };
+        out.push(ParkStatus {
+            park: hash,
+            escrow: park.escrow,
+            amounts: park.amounts,
+            requested_lots: park.requested_lots,
+            parked_at: record.action().timestamp(),
+            settlement,
+        });
+    }
+    Ok(out)
 }
 
 /// Escrows the caller has opened, newest first.
@@ -256,7 +289,7 @@ pub fn get_balance() -> ExternResult<BalanceView> {
     for (park_hash, park) in &mine.parks {
         let consumed = escrow_runs(&park.escrow)?
             .iter()
-            .any(|(_, r)| r.consumed.contains(park_hash));
+            .any(|r| r.run.consumed.contains(park_hash));
         if !consumed {
             parked = add(parked, park.amounts)?;
         }
@@ -348,18 +381,82 @@ fn link_targets(base: impl Into<AnyLinkableHash>, link_type: LinkTypes) -> Exter
         .collect())
 }
 
+/// A settlement run with the metadata readers need from its action.
+struct EscrowRun {
+    hash: ActionHash,
+    seq: u32,
+    /// The run's action timestamp: the `now` its validation used.
+    at: Timestamp,
+    run: SettlementRun,
+}
+
 /// An escrow's runs, oldest first (runs are all on the maker's chain, so
 /// `action_seq` orders them).
-fn escrow_runs(escrow: &ActionHash) -> ExternResult<Vec<(ActionHash, SettlementRun)>> {
+fn escrow_runs(escrow: &ActionHash) -> ExternResult<Vec<EscrowRun>> {
     let mut runs = Vec::new();
     for hash in link_targets(escrow.clone(), LinkTypes::EscrowToRuns)? {
         let record = get_record(&hash)?;
         if let Some(EntryTypes::SettlementRun(run)) = decode_record(&record)? {
-            runs.push((record.action().action_seq(), hash, run));
+            runs.push(EscrowRun {
+                hash,
+                seq: record.action().action_seq(),
+                at: record.action().timestamp(),
+                run,
+            });
         }
     }
-    runs.sort_by_key(|(seq, _, _)| *seq);
-    Ok(runs.into_iter().map(|(_, h, r)| (h, r)).collect())
+    runs.sort_by_key(|r| r.seq);
+    Ok(runs)
+}
+
+/// How many lots a consumed park was filled, by replaying the consuming run
+/// through `execute_run` with the inputs its validation used.
+fn replay_fill(
+    escrow: &ActionHash,
+    runs: &[EscrowRun],
+    consuming: &EscrowRun,
+    park: &ActionHash,
+) -> ExternResult<u64> {
+    let (escrow_record, entry) = get_escrow(escrow)?;
+    let prev_locked = match &consuming.run.prev_run {
+        Some(prev) => {
+            runs.iter()
+                .find(|r| &r.hash == prev)
+                .ok_or_else(|| guest(format!("previous run {prev} not found")))?
+                .run
+                .locked
+        }
+        None => entry.terms.initial_lock().map_err(core_err)?,
+    };
+    let mut parks = Vec::with_capacity(consuming.run.consumed.len());
+    for hash in &consuming.run.consumed {
+        let record = get_record(hash)?;
+        let Some(EntryTypes::Park(p)) = decode_record(&record)? else {
+            return Err(guest(format!("{hash} is not a park")));
+        };
+        parks.push(ParkInput {
+            id: hash.clone(),
+            taker: record.action().author().clone(),
+            amounts: p.amounts,
+            requested_lots: p.requested_lots,
+            parked_at: record.action().timestamp().as_micros(),
+        });
+    }
+    let output = execute_run(&RunInput {
+        terms: entry.terms,
+        maker: escrow_record.action().author().clone(),
+        prev_locked,
+        parks,
+        now: consuming.at.as_micros(),
+        mode: consuming.run.mode,
+    })
+    .map_err(core_err)?;
+    output
+        .outcomes
+        .iter()
+        .find(|o| &o.id == park)
+        .map(|o| o.filled_lots)
+        .ok_or_else(|| guest(format!("run {} did not consume {park}", consuming.hash)))
 }
 
 fn incoming_runs(agent: &AgentPubKey) -> ExternResult<Vec<(ActionHash, SettlementRun)>> {

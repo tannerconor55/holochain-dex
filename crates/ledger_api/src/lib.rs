@@ -77,6 +77,28 @@ pub struct EscrowState {
     pub expired: bool,
     /// Released: nothing left locked and no further fills possible.
     pub closed: bool,
+    /// Timestamp of the first `Release` run, if the order was released.
+    pub released_at: Option<Timestamp>,
+}
+
+/// One of the caller's parks and how it resolved.
+#[derive(Serialize, Deserialize, Debug)]
+pub struct ParkStatus {
+    pub park: ActionHash,
+    pub escrow: ActionHash,
+    pub amounts: Amounts,
+    pub requested_lots: u64,
+    pub parked_at: Timestamp,
+    /// `None` while the park waits for the maker's next run.
+    pub settlement: Option<ParkSettlement>,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct ParkSettlement {
+    /// The run that consumed the park.
+    pub run: ActionHash,
+    /// Lots filled; `0` means the park was refunded in full.
+    pub filled_lots: u64,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
