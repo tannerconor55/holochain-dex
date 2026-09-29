@@ -1,0 +1,15 @@
+[package]
+name = "ledger_integrity"
+version = "0.1.0"
+edition = "2021"
+description = "Mock Unyt ledger: entry types and validation (DNA-hash impacting)"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+name = "ledger_integrity"
+
+[dependencies]
+hdi = { workspace = true }
+serde = { workspace = true }
+holochain_serialized_bytes = { workspace = true }
+dex_core = { workspace = true }

@@ -1,0 +1,17 @@
+# DNA manifest (Holochain 0.6, manifest_version "0").
+# Changing any integrity zome, or this file's integrity section, changes the DNA hash.
+manifest_version: "0"
+name: dex
+integrity:
+  network_seed: null
+  properties: null
+  zomes:
+    # Mock Unyt ledger. Replaced by Unyt itself once API access exists.
+    - name: ledger_integrity
+      path: ../../target/wasm32-unknown-unknown/release/ledger_integrity.wasm
+coordinator:
+  zomes:
+    - name: ledger
+      path: ../../target/wasm32-unknown-unknown/release/ledger.wasm
+      dependencies:
+        - name: ledger_integrity
