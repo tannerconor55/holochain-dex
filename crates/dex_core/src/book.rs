@@ -15,6 +15,9 @@ use crate::{Amounts, CoreError, OrderTerms, Side};
 use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
 
+pub mod market;
+pub use market::{plan_market, plan_market_by_budget, MarketError, MarketPlan};
+
 /// One order as the book sees it. `P` is the order's id (the escrow's
 /// `ActionHash` in the zome), `K` the maker's identity.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
