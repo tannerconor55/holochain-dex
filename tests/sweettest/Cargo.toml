@@ -1,0 +1,17 @@
+[package]
+name = "dex_sweettest"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# Built separately from the zome workspace: `holochain` is the full conductor.
+# Run from the repo root inside the dev shell:
+#   nix develop -c ./build.sh
+#   nix develop -c cargo test --manifest-path tests/sweettest/Cargo.toml
+[workspace]
+
+[dependencies]
+dex_core = { path = "../../crates/dex_core" }
+holochain = { version = "=0.6.3", features = ["test_utils"] }
+serde = { version = "1", features = ["derive"] }
+tokio = { version = "1", features = ["full"] }
