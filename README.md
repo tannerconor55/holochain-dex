@@ -11,13 +11,13 @@ Spec documents: *DEX MVP Protocol v0.1* and *Smart Agreement Plan v0.1*.
 
 | Piece | State |
 |---|---|
-| `dex_core` settlement logic, order book views, listing tags | Done. 35 unit tests pass (`cargo test -p dex_core`). |
-| `ledger_integrity` (mock Unyt: entries + validation) | Done. Runs in a holochain 0.7.0 conductor. |
-| `ledger` coordinator (settlement interface) | Done. Runs in a holochain 0.7.0 conductor. |
-| Sweettest harness (§30 demo, double-spend, balance, maker-only) | 4 tests pass against holochain 0.7.0. |
-| `dex_integrity`: order book listing links and validation | Done. Not yet exercised: needs the `dex` coordinator. |
-| `dex` coordinator: order book reads, take planning, calls into `ledger` | Next (PLAN.md Phase 3). |
-| Signals / notifications, maker auto-run loop, UI | Later. |
+| `dex_core`: settlement logic, order book views, listing tags, order status | Done. 36 unit tests. |
+| `ledger_integrity` / `ledger` (mock Unyt ledger) | Done. Runs on holochain 0.7.0. |
+| `dex_integrity`: listing links, validated against the escrow | Done. Wrong tag and wrong author rejected in a conductor. |
+| `dex` coordinator: listing, book, take planning, maker settlement | Done. |
+| Signals (`park_placed`, `run_settled`) and maker auto-run | Done; the UI drives the auto-run. |
+| Sweettest suite | 12 tests pass (~15 min; each test starts its own conductors). |
+| UI (`ui/`): wallet, book, ticket, take flow, my orders, activity | Done. 13 Vitest tests; the demo script passes in Playwright against two real conductors. |
 | Rhai Smart Agreement template for real Unyt | Later; port of `dex_core::execute_run`. |
 
 ## Layout
@@ -53,6 +53,33 @@ Versions: `hdk = "=0.7.0"`, `hdi = "=0.8.0"`, `holochain = "=0.7.0"`
 built on top. 0.6 and 0.7 conductors form separate networks with no data
 migration. When the mock ledger is replaced, the Holochain version must match
 what Unyt runs.
+
+## Run the UI (two agents)
+
+The UI lives in `ui/` (Svelte 5, Vite, `@holochain/client` 0.21). Every
+command runs inside the dev shell, which provides `holochain`, `lair-keystore`
+and the local bootstrap/relay server. Build the hApp first.
+
+```bash
+nix develop -c ./build.sh
+cd ui && nix develop .. -c npm install
+
+# Two agents in two windows (hc-spin starts the conductors and a local
+# bootstrap + relay server):
+nix develop .. -c npm start
+
+# Or two browser tabs against two sandboxes: start them, then `npm run dev`
+# and open the two URLs the script prints (?admin_port=…&app_port=…).
+nix develop -c ./scripts/sandbox.sh
+
+nix develop .. -c npm test          # Vitest: amounts, API layer, signal parsing
+nix develop .. -c npm run check     # svelte-check
+nix develop .. -c npm run e2e       # Playwright: the demo script in two tabs
+```
+
+A maker's orders settle automatically only while their app is open: the UI
+runs `run_my_orders` on every `park_placed` signal and every 10 s poll, and
+collects allocations on `run_settled` and on the poll.
 
 ## How settlement works
 

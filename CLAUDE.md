@@ -13,6 +13,10 @@ README.md for design, invariants and known limitations. Use the `holochain`,
 - `nix develop -c cargo test -p dex_core` — settlement logic unit tests
 - `nix develop -c ./build.sh` — build wasm, pack `dex.dna` and `dex.happ`
 - `nix develop -c cargo test --manifest-path tests/sweettest/Cargo.toml` — conductor tests (needs `./build.sh` first)
+- In `ui/`: `nix develop .. -c npm start` (two agents via hc-spin), `npm test` (Vitest),
+  `npm run check` (svelte-check), `npm run e2e` (Playwright demo; starts `scripts/sandbox.sh`)
+- UI types in `ui/src/lib/api.ts` mirror `ledger_api` / `dex_api` / `dex_core` by hand:
+  change them together with the Rust structs.
 
 ## Rules
 
