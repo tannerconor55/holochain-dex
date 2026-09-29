@@ -11,15 +11,16 @@
 //! in `dex_core::book`.
 
 use dex_api::{
-    BookView, DexSignal, LevelQuery, MyOrder, Order, PlacedPark, RawListing, TakePlan, TakeRequest,
-    TakeResult,
+    BookView, DexSignal, FillChange, LevelQuery, MarketAmount, MarketBudgetRequest, MarketOrderRequest,
+    MarketPlan, MarketPreviewRequest, MarketResult, MarketRetry, MyOrder, Order, PlacedPark,
+    RawListing, RetryMarketRequest, TakePlan, TakeRequest, TakeResult, DEFAULT_MAX_SLIPPAGE_BPS,
 };
 use dex_core::book;
 use dex_core::listing::{decode_tag, encode_tag};
 use dex_integrity::{market_anchor, LinkTypes};
 use hdk::prelude::*;
 use ledger_api::{
-    EscrowState, OrderTerms, ParkRequest, ParkStatus, PendingPark, RunEscrowInput, RunMode,
+    EscrowState, OrderTerms, ParkRequest, ParkStatus, PendingPark, RunEscrowInput, RunMode, Side,
     RunReport,
 };
 use std::collections::BTreeSet;
@@ -182,6 +183,13 @@ pub fn take(request: TakeRequest) -> ExternResult<TakeResult> {
     let now = now()?;
     let orders = load_orders(now)?;
     let plan = plan(&request, &orders, now)?;
+    let parks = park_plan(&plan, &orders)?;
+    Ok(TakeResult { plan, parks })
+}
+
+/// Park exactly what `plan` says against each order, and tell each maker.
+/// The one path every take, market order and retry parks through.
+fn park_plan(plan: &TakePlan<ActionHash>, orders: &[Order]) -> ExternResult<Vec<PlacedPark>> {
     let me = my_key()?;
     let mut parks = Vec::with_capacity(plan.fills.len());
     for fill in &plan.fills {
@@ -210,7 +218,158 @@ pub fn take(request: TakeRequest) -> ExternResult<TakeResult> {
             lots: fill.lots,
         });
     }
-    Ok(TakeResult { plan, parks })
+    Ok(parks)
+}
+
+// ---------------------------------------------------------------------------
+// Market orders
+// ---------------------------------------------------------------------------
+//
+// Taker-only and immediate-or-cancel: a sweep from the best price within a
+// slippage limit, parked through `park_plan` like any take. Nothing rests on
+// the book; each maker's run fills what it can at the maker's own price and
+// refunds the rest. The slippage limit protects the taker's client only:
+// validation does not know about it.
+
+/// Read-only: what a market order would take right now.
+#[hdk_extern]
+pub fn preview_market_order(request: MarketPreviewRequest) -> ExternResult<MarketPlan<ActionHash>> {
+    let now = now()?;
+    market_plan(request.side, request.amount, request.max_slippage_bps, &load_orders(now)?, now)
+}
+
+#[hdk_extern]
+pub fn market_order(request: MarketOrderRequest) -> ExternResult<MarketResult> {
+    execute_market(
+        request.side,
+        MarketAmount::Lots(request.lots),
+        request.max_slippage_bps,
+        request.expected.as_ref(),
+    )
+}
+
+#[hdk_extern]
+pub fn market_order_by_budget(request: MarketBudgetRequest) -> ExternResult<MarketResult> {
+    execute_market(
+        request.side,
+        MarketAmount::Budget(request.budget),
+        request.max_slippage_bps,
+        request.expected.as_ref(),
+    )
+}
+
+/// Retry a market order's unfilled lots once, against the fresh book but
+/// within the ORIGINAL limit price, never one derived from the new best
+/// price. Unfilled = the original shortfall plus each settled park's
+/// unfilled lots; parks the makers have not run yet are not retried.
+/// A retry cannot itself be retried: place a new market order instead.
+#[hdk_extern]
+pub fn retry_market_shortfall(request: RetryMarketRequest) -> ExternResult<MarketRetry> {
+    let original = request.original;
+    if original.attempt > 0 {
+        return Err(guest("a market order's remainder may be retried once; place a new order instead"));
+    }
+    let statuses: Vec<ParkStatus> = ledger("get_my_parks", ())?;
+    let mut unfilled = original.plan.plan.shortfall;
+    let mut still_pending = 0;
+    for placed in &original.parks {
+        match statuses.iter().find(|s| s.park == placed.park).and_then(|s| s.settlement.as_ref()) {
+            Some(settled) => unfilled += placed.lots.saturating_sub(settled.filled_lots),
+            None => still_pending += 1,
+        }
+    }
+    if unfilled == 0 {
+        return Ok(MarketRetry {
+            unfilled_lots: 0,
+            still_pending,
+            result: None,
+        });
+    }
+    let now = now()?;
+    let orders = load_orders(now)?;
+    let plan = book::market::plan_with_limit(
+        &orders,
+        original.plan.take,
+        unfilled,
+        original.plan.limit_price,
+        &my_key()?,
+        now,
+    )
+    .map_err(market_err)?;
+    let parks = park_plan(&plan.plan, &orders)?;
+    Ok(MarketRetry {
+        unfilled_lots: unfilled,
+        still_pending,
+        result: Some(MarketResult {
+            plan,
+            parks,
+            changes: Vec::new(),
+            attempt: original.attempt + 1,
+        }),
+    })
+}
+
+fn market_plan(
+    side: Side,
+    amount: MarketAmount,
+    max_slippage_bps: Option<u32>,
+    orders: &[Order],
+    now: i64,
+) -> ExternResult<MarketPlan<ActionHash>> {
+    let bps = max_slippage_bps.unwrap_or(DEFAULT_MAX_SLIPPAGE_BPS);
+    let me = my_key()?;
+    match amount {
+        MarketAmount::Lots(lots) => book::plan_market(orders, side, lots, bps, &me, now),
+        MarketAmount::Budget(budget) => book::plan_market_by_budget(orders, side, budget, bps, &me, now),
+    }
+    .map_err(market_err)
+}
+
+/// Plan from one fresh read and park in the same call, so nothing can change
+/// between the two; `expected` (the confirmed preview) is what may differ.
+fn execute_market(
+    side: Side,
+    amount: MarketAmount,
+    max_slippage_bps: Option<u32>,
+    expected: Option<&MarketPlan<ActionHash>>,
+) -> ExternResult<MarketResult> {
+    let now = now()?;
+    let orders = load_orders(now)?;
+    let plan = market_plan(side, amount, max_slippage_bps, &orders, now)?;
+    let parks = park_plan(&plan.plan, &orders)?;
+    let changes = expected.map(|e| fill_changes(&e.plan, &plan.plan)).unwrap_or_default();
+    Ok(MarketResult {
+        plan,
+        parks,
+        changes,
+        attempt: 0,
+    })
+}
+
+/// Orders whose lots differ between two plans, in the order they appear.
+fn fill_changes(expected: &TakePlan<ActionHash>, planned: &TakePlan<ActionHash>) -> Vec<FillChange> {
+    let lots_in = |plan: &TakePlan<ActionHash>, order: &ActionHash| {
+        plan.fills.iter().find(|f| &f.order == order).map_or(0, |f| f.lots)
+    };
+    let mut seen = BTreeSet::new();
+    expected
+        .fills
+        .iter()
+        .chain(&planned.fills)
+        .filter(|f| seen.insert(f.order.clone()))
+        .filter_map(|f| {
+            let (expected_lots, planned_lots) = (lots_in(expected, &f.order), lots_in(planned, &f.order));
+            (expected_lots != planned_lots).then(|| FillChange {
+                order: f.order.clone(),
+                expected_lots,
+                planned_lots,
+            })
+        })
+        .collect()
+}
+
+fn market_err(e: book::MarketError) -> WasmError {
+    guest(e.to_string())
 }
 
 // ---------------------------------------------------------------------------

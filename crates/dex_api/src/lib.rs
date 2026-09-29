@@ -29,7 +29,7 @@ pub struct TakeRequest {
     pub limit_price: Option<u64>,
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct PlacedPark {
     pub escrow: ActionHash,
     pub park: ActionHash,
@@ -50,6 +50,85 @@ pub struct TakeResult {
 pub struct RawListing {
     pub escrow: ActionHash,
     pub tag: Vec<u8>,
+}
+
+// ---------------------------------------------------------------------------
+// Market orders
+// ---------------------------------------------------------------------------
+
+pub use dex_core::book::market::DEFAULT_MAX_SLIPPAGE_BPS;
+pub use dex_core::book::MarketPlan;
+
+/// How much a market order takes: whole lots, or a budget of the paying
+/// asset (B for a buy, A for a sell) spent on whole lots.
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MarketAmount {
+    Lots(u64),
+    Budget(u64),
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct MarketPreviewRequest {
+    /// The taker's direction: `Buy` sweeps asks, `Sell` sweeps bids.
+    pub side: Side,
+    pub amount: MarketAmount,
+    /// Defaults to `DEFAULT_MAX_SLIPPAGE_BPS` (200 = 2%).
+    pub max_slippage_bps: Option<u32>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct MarketOrderRequest {
+    pub side: Side,
+    pub lots: u64,
+    pub max_slippage_bps: Option<u32>,
+    /// The preview the user confirmed, if any. The result lists every order
+    /// whose lots differ from it.
+    pub expected: Option<MarketPlan<ActionHash>>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct MarketBudgetRequest {
+    pub side: Side,
+    /// Minor units of the paying asset: B for a buy, A for a sell.
+    pub budget: u64,
+    pub max_slippage_bps: Option<u32>,
+    pub expected: Option<MarketPlan<ActionHash>>,
+}
+
+/// An order whose planned lots differ from the confirmed preview.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct FillChange {
+    pub order: ActionHash,
+    /// `0` if the preview did not include this order.
+    pub expected_lots: u64,
+    /// `0` if the order is no longer in the plan (filled, cancelled, expired).
+    pub planned_lots: u64,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct MarketResult {
+    pub plan: MarketPlan<ActionHash>,
+    pub parks: Vec<PlacedPark>,
+    /// Differences from `expected`; empty if none was given or nothing changed.
+    pub changes: Vec<FillChange>,
+    /// `0` for a market order, `1` for its one retry.
+    pub attempt: u32,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct RetryMarketRequest {
+    pub original: MarketResult,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct MarketRetry {
+    /// Lots known to be unfilled: the original shortfall plus every settled
+    /// park's unfilled lots.
+    pub unfilled_lots: u64,
+    /// Original parks the makers have not run yet; their lots are not retried.
+    pub still_pending: u64,
+    /// The retry, if there was anything to retry.
+    pub result: Option<MarketResult>,
 }
 
 /// Sent between agents' dex zomes and re-emitted to the local UI.
