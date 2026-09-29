@@ -62,6 +62,8 @@ pub struct RunReport {
     pub locked: Amounts,
     /// Parks still waiting because this run hit the per-run cap.
     pub still_pending: usize,
+    /// Every agent this run allocated funds to (takers and the maker).
+    pub receivers: Vec<AgentPubKey>,
 }
 
 #[derive(Serialize, Deserialize, Debug)]

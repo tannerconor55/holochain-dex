@@ -11,7 +11,7 @@
 //! in `dex_core::book`.
 
 use dex_api::{
-    BookView, LevelQuery, MyOrder, Order, PlacedPark, RawListing, TakePlan, TakeRequest,
+    BookView, DexSignal, LevelQuery, MyOrder, Order, PlacedPark, RawListing, TakePlan, TakeRequest,
     TakeResult,
 };
 use dex_core::book;
@@ -29,6 +29,38 @@ const LEDGER: &str = "ledger";
 /// Most settlement runs one call makes on one escrow. Each run consumes up to
 /// `dex_core::MAX_PARKS_PER_RUN` parks; anything beyond waits for the next call.
 const MAX_RUNS_PER_CALL: usize = 10;
+
+// ---------------------------------------------------------------------------
+// Signals
+// ---------------------------------------------------------------------------
+
+/// Let other agents send this cell remote signals, and nothing else.
+#[hdk_extern]
+pub fn init() -> ExternResult<InitCallbackResult> {
+    let mut functions = HashSet::new();
+    functions.insert((zome_info()?.name, FunctionName::from("recv_remote_signal")));
+    create_cap_grant(CapGrantEntry {
+        tag: "remote_signals".into(),
+        access: CapAccess::Unrestricted,
+        functions: GrantedFunctions::Listed(functions),
+    })?;
+    Ok(InitCallbackResult::Pass)
+}
+
+/// Pass a signal from another agent to the local UI. Anyone may call this,
+/// so it only re-emits: the UI treats every signal as a hint to re-read.
+#[hdk_extern]
+pub fn recv_remote_signal(signal: DexSignal) -> ExternResult<()> {
+    emit_signal(signal)
+}
+
+/// Fire and forget: an offline recipient finds out on their next poll.
+fn notify(signal: DexSignal, agents: Vec<AgentPubKey>) -> ExternResult<()> {
+    if agents.is_empty() {
+        return Ok(());
+    }
+    send_remote_signal(signal, agents)
+}
 
 // ---------------------------------------------------------------------------
 // Listing
@@ -148,7 +180,9 @@ fn order_view(state: EscrowState) -> Order {
 #[hdk_extern]
 pub fn take(request: TakeRequest) -> ExternResult<TakeResult> {
     let now = now()?;
-    let plan = plan(&request, &load_orders(now)?, now)?;
+    let orders = load_orders(now)?;
+    let plan = plan(&request, &orders, now)?;
+    let me = my_key()?;
     let mut parks = Vec::with_capacity(plan.fills.len());
     for fill in &plan.fills {
         let park: ActionHash = ledger(
@@ -159,7 +193,17 @@ pub fn take(request: TakeRequest) -> ExternResult<TakeResult> {
                 requested_lots: fill.lots,
             },
         )?;
-        // Phase 4: signal the maker here.
+        if let Some(order) = orders.iter().find(|o| o.id == fill.order) {
+            notify(
+                DexSignal::ParkPlaced {
+                    escrow: fill.order.clone(),
+                    park: park.clone(),
+                    taker: me.clone(),
+                    lots: fill.lots,
+                },
+                vec![order.maker.clone()],
+            )?;
+        }
         parks.push(PlacedPark {
             escrow: fill.order.clone(),
             park,
@@ -211,7 +255,9 @@ pub fn run_my_orders() -> ExternResult<Vec<RunReport>> {
 }
 
 /// Run `mode` until no park is left pending, at most `MAX_RUNS_PER_CALL` times.
+/// Each run's receivers other than the caller are told to collect.
 fn run_until_settled(escrow: &ActionHash, mode: RunMode) -> ExternResult<Vec<RunReport>> {
+    let me = my_key()?;
     let mut reports = Vec::new();
     for _ in 0..MAX_RUNS_PER_CALL {
         let report: Option<RunReport> = ledger(
@@ -223,6 +269,15 @@ fn run_until_settled(escrow: &ActionHash, mode: RunMode) -> ExternResult<Vec<Run
         )?;
         // `None`: a fill with nothing pending.
         let Some(report) = report else { break };
+        notify(
+            DexSignal::RunSettled {
+                escrow: escrow.clone(),
+                run: report.run.clone(),
+                maker: me.clone(),
+                mode,
+            },
+            report.receivers.iter().filter(|r| **r != me).cloned().collect(),
+        )?;
         let done = report.still_pending == 0;
         reports.push(report);
         if done {

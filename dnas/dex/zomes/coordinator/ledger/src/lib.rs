@@ -142,6 +142,7 @@ pub fn run_escrow(input: RunEscrowInput) -> ExternResult<Option<RunReport>> {
             .collect(),
         locked: output.locked,
         still_pending: pending_count - run_input.parks.len(),
+        receivers: output.allocations.iter().map(|a| a.receiver.clone()).collect(),
     }))
 }
 

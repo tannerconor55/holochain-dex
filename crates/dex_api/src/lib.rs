@@ -4,7 +4,7 @@
 //! part of the wire format (msgpack maps are keyed by name).
 
 use hdi::prelude::{ActionHash, AgentPubKey};
-use ledger_api::{EscrowState, PendingPark, Side};
+use ledger_api::{EscrowState, PendingPark, RunMode, Side};
 use serde::{Deserialize, Serialize};
 
 pub use dex_core::book::{BookView, OrderStatus, OrderView, PlannedFill, PriceLevel, TakePlan};
@@ -52,10 +52,90 @@ pub struct RawListing {
     pub tag: Vec<u8>,
 }
 
+/// Sent between agents' dex zomes and re-emitted to the local UI.
+///
+/// Signals are hints, never state: they can be lost, delayed or forged. A
+/// client reacts by re-reading and calling idempotent externs
+/// (`run_my_orders`, `collect_all`), and also polls, so a missed signal only
+/// delays settlement.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum DexSignal {
+    /// A taker parked funds against the recipient's order. The recipient's
+    /// client should call `run_my_orders`.
+    ParkPlaced {
+        escrow: ActionHash,
+        park: ActionHash,
+        taker: AgentPubKey,
+        lots: u64,
+    },
+    /// A maker's run allocated funds to the recipient. The recipient's client
+    /// should call the ledger's `collect_all`.
+    RunSettled {
+        escrow: ActionHash,
+        run: ActionHash,
+        maker: AgentPubKey,
+        mode: RunMode,
+    },
+}
+
 #[derive(Serialize, Deserialize, Debug)]
 pub struct MyOrder {
     pub state: EscrowState,
     /// Parks waiting for this order's next run, oldest first.
     pub pending: Vec<PendingPark>,
     pub status: OrderStatus,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use hdi::prelude::{decode, encode};
+
+    fn action(byte: u8) -> ActionHash {
+        ActionHash::from_raw_36(vec![byte; 36])
+    }
+
+    fn agent(byte: u8) -> AgentPubKey {
+        AgentPubKey::from_raw_36(vec![byte; 36])
+    }
+
+    /// The part of the wire shape a UI switches on.
+    #[derive(Deserialize, Debug)]
+    struct Tagged {
+        #[serde(rename = "type")]
+        kind: String,
+    }
+
+    fn round_trip(signal: DexSignal, kind: &str) {
+        let bytes = encode(&signal).unwrap();
+        assert_eq!(decode::<_, DexSignal>(&bytes).unwrap(), signal);
+        assert_eq!(decode::<_, Tagged>(&bytes).unwrap().kind, kind);
+    }
+
+    #[test]
+    fn park_placed_is_tagged_and_round_trips() {
+        round_trip(
+            DexSignal::ParkPlaced {
+                escrow: action(1),
+                park: action(2),
+                taker: agent(3),
+                lots: 40,
+            },
+            "park_placed",
+        );
+    }
+
+    #[test]
+    fn run_settled_is_tagged_and_round_trips() {
+        round_trip(
+            DexSignal::RunSettled {
+                escrow: action(1),
+                run: action(4),
+                maker: agent(5),
+                mode: RunMode::Fill,
+            },
+            "run_settled",
+        );
+    }
 }

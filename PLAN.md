@@ -16,8 +16,8 @@ items marked **(verify)** below are things I have not checked.
 | Can a listing lie about price? | No. Integrity validation recomputes the tag from the escrow's terms and requires link author = escrow author. | Prices in the book are then as trustworthy as the escrow. |
 | Where does remaining quantity come from? | Only from the ledger: `get_escrow_state` (the latest run's `locked`). | One source of truth (§23). |
 | Book maths (aggregation, take planning) | Pure functions in `dex_core::book`, unit tested. | Same rule as settlement: no logic forked into zomes or UI. |
-| Zero-arc / phones? | **Assume no** (desktop, full-arc). Reads use `GetStrategy::Network`. | Confirm with the user; if yes, add a `local` flag to every read. |
-| Relaxed / async commits? | **Assume no** (synchronous). Signals may be sent inline from externs. | Same. If ever yes, move signals to `post_commit`. |
+| Zero-arc / phones? | **No** for v1 (desktop, full-arc; confirmed 2026-09-29). Reads use `GetStrategy::Network`. | If that changes, add a `local` flag to every read. |
+| Relaxed / async commits? | **No** for v1 (synchronous; confirmed 2026-09-29). Signals are sent inline from externs. | If that changes, move signals to `post_commit`. |
 | Who settles fills? | The maker's own client, automatically while it is online. | Protocol design: `AuthorizedExecutor` = maker. |
 | UI stack | Svelte 5 + Vite + TypeScript + `@holochain/client`. | Matches what the scaffolder produces. Use `@holochain/client` 0.21 (targets Holochain 0.7); keep a single copy in the tree. |
 | Multi-agent local dev | Try `hc-spin` in the Holonix shell **(verify it exists)**; otherwise two `hc sandbox` instances on different ports and a `?app_port=` URL param. | Every demo needs two agents. |

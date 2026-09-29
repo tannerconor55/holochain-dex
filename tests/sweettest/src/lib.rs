@@ -675,3 +675,86 @@ async fn more_parks_than_one_run_takes_settle_in_one_call() {
     assert!(parks.iter().all(|p| p.settlement.is_some()), "no park left waiting");
     assert_eq!(env.total_supply().await, minted);
 }
+
+// ---------------------------------------------------------------------------
+// Signals
+// ---------------------------------------------------------------------------
+
+type Signals = tokio::sync::broadcast::Receiver<holochain::prelude::Signal>;
+
+impl TestEnv {
+    fn signals(&self, agent: usize) -> Signals {
+        self.conductors[self.agents[agent].conductor].subscribe_to_app_signals("dex".to_string())
+    }
+
+    fn key(&self, agent: usize) -> AgentPubKey {
+        self.agents[agent].cell.agent_pubkey().clone()
+    }
+}
+
+/// The next dex signal on this stream, skipping anything else.
+async fn next_dex_signal(signals: &mut Signals) -> dex_api::DexSignal {
+    let wait = async {
+        loop {
+            match signals.recv().await {
+                Ok(holochain::prelude::Signal::App { signal, .. }) => {
+                    if let Ok(dex) = signal.into_inner().decode::<dex_api::DexSignal>() {
+                        return dex;
+                    }
+                }
+                Ok(_) => {}
+                Err(e) => panic!("signal stream closed: {e}"),
+            }
+        }
+    };
+    tokio::time::timeout(std::time::Duration::from_secs(60), wait)
+        .await
+        .expect("no dex signal within 60 s")
+}
+
+/// A take signals the maker; the maker's client reacts by calling
+/// `run_my_orders` (no manual `run_escrow`), which signals the taker to collect.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_park_signals_the_maker_and_the_run_signals_the_taker() {
+    use dex_api::DexSignal;
+
+    let env = TestEnv::new(2).await;
+    let mut alice_signals = env.signals(ALICE);
+    let mut bob_signals = env.signals(BOB);
+    let _: ActionHash = env.call(ALICE, "mint", Amounts::new(4_000, 0)).await;
+    let _: ActionHash = env.call(BOB, "mint", Amounts::new(0, 4_800)).await;
+    let order: ActionHash = env.dex(ALICE, "place_order", sell(40, 120)).await;
+    env.sync().await;
+
+    let taken: TakeResult = env
+        .dex(BOB, "take", TakeRequest { take: Side::Buy, lots: 40, limit_price: None })
+        .await;
+    let park = taken.parks[0].park.clone();
+
+    // Alice's client: a ParkPlaced signal arrives.
+    let signal = next_dex_signal(&mut alice_signals).await;
+    assert_eq!(
+        signal,
+        DexSignal::ParkPlaced { escrow: order.clone(), park, taker: env.key(BOB), lots: 40 }
+    );
+    // It reacts the only way a client should: re-read and run, idempotently.
+    // The park may not have reached Alice's view of the DHT yet.
+    env.sync().await;
+    let reports: Vec<RunReport> = env.dex(ALICE, "run_my_orders", ()).await;
+    assert_eq!(reports.iter().map(|r| r.filled_lots).collect::<Vec<_>>(), vec![40]);
+
+    // Bob's client: a RunSettled signal arrives; it collects.
+    let signal = next_dex_signal(&mut bob_signals).await;
+    assert_eq!(
+        signal,
+        DexSignal::RunSettled {
+            escrow: order,
+            run: reports[0].run.clone(),
+            maker: env.key(ALICE),
+            mode: RunMode::Fill,
+        }
+    );
+    env.sync().await;
+    env.collect(BOB).await;
+    assert_eq!(env.balance(BOB).await.available, Amounts::new(4_000, 0));
+}
