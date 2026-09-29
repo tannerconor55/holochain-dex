@@ -1,0 +1,13 @@
+[package]
+name = "ledger_api"
+version = "0.1.0"
+edition = "2021"
+description = "Input and output types of the ledger zome's settlement interface"
+
+# Depends on `hdi` (not `hdk`) for hashes and timestamps, so the ledger
+# coordinator, the dex coordinator and the Sweettest crate can all share it
+# without pulling in the ledger zome's `#[hdk_extern]` exports.
+[dependencies]
+hdi = { workspace = true }
+serde = { workspace = true }
+dex_core = { workspace = true }

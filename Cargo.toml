@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "crates/dex_core",
+    "crates/ledger_api",
     "dnas/dex/zomes/integrity/ledger",
     "dnas/dex/zomes/coordinator/ledger",
 ]
@@ -17,6 +18,7 @@ serde = { version = "1", features = ["derive"] }
 holochain_serialized_bytes = "=0.0.57"
 
 dex_core = { path = "crates/dex_core" }
+ledger_api = { path = "crates/ledger_api" }
 ledger_integrity = { path = "dnas/dex/zomes/integrity/ledger" }
 
 [profile.dev]

@@ -12,6 +12,7 @@ publish = false
 
 [dependencies]
 dex_core = { path = "../../crates/dex_core" }
+ledger_api = { path = "../../crates/ledger_api" }
 holochain = { version = "=0.6.3", features = ["test_utils"] }
 serde = { version = "1", features = ["derive"] }
 tokio = { version = "1", features = ["full"] }

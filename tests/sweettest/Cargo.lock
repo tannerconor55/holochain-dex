@@ -1560,6 +1560,7 @@ version = "0.1.0"
 dependencies = [
  "dex_core",
  "holochain",
+ "ledger_api",
  "serde",
  "tokio",
 ]
@@ -4282,6 +4283,15 @@ name = "leb128fmt"
 version = "0.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "09edd9e8b54e49e587e4f6295a7d29c3ea94d469cb40ab8ca70b288248a81db2"
+
+[[package]]
+name = "ledger_api"
+version = "0.1.0"
+dependencies = [
+ "dex_core",
+ "hdi",
+ "serde",
+]
 
 [[package]]
 name = "libc"

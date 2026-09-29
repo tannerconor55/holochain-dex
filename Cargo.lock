@@ -630,7 +630,17 @@ dependencies = [
  "dex_core",
  "hdk",
  "holochain_serialized_bytes",
+ "ledger_api",
  "ledger_integrity",
+ "serde",
+]
+
+[[package]]
+name = "ledger_api"
+version = "0.1.0"
+dependencies = [
+ "dex_core",
+ "hdi",
  "serde",
 ]
 

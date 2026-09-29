@@ -5,69 +5,19 @@
 //!
 //! Needs the packed DNA: run `./build.sh` first (or set `DEX_DNA_PATH`).
 
-use dex_core::{Amounts, OrderTerms, RunMode, Side};
+// Test-only crate: without this, the non-test library build that `cargo test`
+// also makes (for doctests) reports every fixture as dead code.
+#![cfg(test)]
+
 use holochain::prelude::*;
 use holochain::conductor::api::error::ConductorApiResult;
 use holochain::sweettest::*;
-use serde::{Deserialize, Serialize};
+use ledger_api::{
+    Amounts, BalanceView, EscrowState, OrderTerms, ParkRequest, RunEscrowInput, RunMode, RunReport,
+    Side,
+};
+use serde::Serialize;
 use std::path::PathBuf;
-
-// ---------------------------------------------------------------------------
-// Local mirrors of the ledger zome's input and output types. Field names must
-// match the zome's structs exactly (msgpack maps are keyed by name).
-// ---------------------------------------------------------------------------
-
-#[derive(Serialize, Deserialize, Debug)]
-pub struct ParkRequest {
-    pub escrow: ActionHash,
-    pub amounts: Amounts,
-    pub requested_lots: u64,
-}
-
-#[derive(Serialize, Deserialize, Debug)]
-pub struct RunEscrowInput {
-    pub escrow: ActionHash,
-    pub mode: RunMode,
-}
-
-#[derive(Serialize, Deserialize, Debug)]
-pub struct ParkFill {
-    pub park: ActionHash,
-    pub filled_lots: u64,
-}
-
-#[derive(Serialize, Deserialize, Debug)]
-pub struct RunReport {
-    pub run: ActionHash,
-    pub mode: RunMode,
-    pub filled_lots: u64,
-    pub fills: Vec<ParkFill>,
-    pub locked: Amounts,
-    pub still_pending: usize,
-}
-
-#[derive(Serialize, Deserialize, Debug)]
-pub struct EscrowState {
-    pub escrow: ActionHash,
-    pub maker: AgentPubKey,
-    pub terms: OrderTerms,
-    pub opened_at: Timestamp,
-    pub locked: Amounts,
-    pub remaining_lots: u64,
-    pub filled_lots: u64,
-    pub runs: usize,
-    pub expired: bool,
-    pub closed: bool,
-}
-
-#[derive(Serialize, Deserialize, Debug)]
-pub struct BalanceView {
-    pub available: Amounts,
-    pub locked_in_escrows: Amounts,
-    pub parked: Amounts,
-    pub uncollected: Amounts,
-    pub total: Amounts,
-}
 
 // ---------------------------------------------------------------------------
 // Fixtures
