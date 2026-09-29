@@ -758,3 +758,211 @@ async fn a_park_signals_the_maker_and_the_run_signals_the_taker() {
     env.collect(BOB).await;
     assert_eq!(env.balance(BOB).await.available, Amounts::new(4_000, 0));
 }
+
+// ---------------------------------------------------------------------------
+// Market orders
+// ---------------------------------------------------------------------------
+
+use dex_api::{MarketBudgetRequest, MarketOrderRequest, MarketResult, MarketRetry, RetryMarketRequest};
+
+fn market(side: Side, lots: u64) -> MarketOrderRequest {
+    MarketOrderRequest {
+        side,
+        lots,
+        max_slippage_bps: Some(200),
+        expected: None,
+    }
+}
+
+fn buy(lots: u64, price_per_lot: u64) -> OrderTerms {
+    OrderTerms {
+        side: Side::Buy,
+        ..sell(lots, price_per_lot)
+    }
+}
+
+async fn run_makers(env: &TestEnv, makers: &[usize]) {
+    env.sync().await;
+    for &maker in makers {
+        let _: Vec<RunReport> = env.dex(maker, "run_my_orders", ()).await;
+    }
+    env.sync().await;
+    collect_all(env).await;
+}
+
+/// A market buy sweeps two levels from two makers; each settles at their own
+/// price and the average is the exact volume-weighted price.
+#[tokio::test(flavor = "multi_thread")]
+async fn market_buy_sweeps_two_levels_from_two_makers() {
+    let env = TestEnv::new(3).await;
+    let _: ActionHash = env.call(ALICE, "mint", Amounts::new(4_000, 0)).await;
+    let _: ActionHash = env.call(CAROL, "mint", Amounts::new(3_500, 0)).await;
+    let _: ActionHash = env.call(BOB, "mint", Amounts::new(0, 20_000)).await;
+    let minted = Amounts::new(7_500, 20_000);
+    let alice_order: ActionHash = env.dex(ALICE, "place_order", sell(40, 120)).await;
+    let carol_order: ActionHash = env.dex(CAROL, "place_order", sell(35, 121)).await;
+    env.sync().await;
+
+    let result: MarketResult = env.dex(BOB, "market_order", market(Side::Buy, 60)).await;
+    let m = &result.plan;
+    assert_eq!((m.reference_price, m.limit_price), (Some(120), 123));
+    let planned: Vec<(ActionHash, u64)> = result.parks.iter().map(|p| (p.escrow.clone(), p.lots)).collect();
+    assert_eq!(planned, vec![(alice_order, 40), (carol_order, 20)]);
+    assert_eq!((m.total_quote_minor, m.total_lots), (4_800 + 2_420, 60), "average 72.20 / 60");
+    assert_eq!(m.worst_price, Some(121));
+    assert_eq!(m.plan.shortfall, 0);
+
+    run_makers(&env, &[ALICE, CAROL]).await;
+    assert_eq!(env.balance(BOB).await.available, Amounts::new(6_000, 20_000 - 7_220));
+    assert_eq!(env.balance(ALICE).await.available, Amounts::new(0, 4_800));
+    assert_eq!(env.balance(CAROL).await.available, Amounts::new(0, 2_420));
+    let fills: Vec<Option<u64>> = env
+        .dex::<_, Vec<ParkStatus>>(BOB, "my_parks", ())
+        .await
+        .iter()
+        .map(|p| p.settlement.as_ref().map(|s| s.filled_lots))
+        .collect();
+    assert_eq!(fills, vec![Some(20), Some(40)], "both makers filled in full");
+    assert_eq!(env.total_supply().await, minted);
+}
+
+/// The slippage limit keeps a far-away level out of the sweep; a budget
+/// order reports what it could not spend.
+#[tokio::test(flavor = "multi_thread")]
+async fn slippage_limit_leaves_a_far_level_untouched() {
+    let env = TestEnv::new(3).await;
+    let _: ActionHash = env.call(ALICE, "mint", Amounts::new(1_000, 0)).await;
+    let _: ActionHash = env.call(CAROL, "mint", Amounts::new(5_000, 0)).await;
+    let _: ActionHash = env.call(BOB, "mint", Amounts::new(0, 10_000)).await;
+    let minted = Amounts::new(6_000, 10_000);
+    let near: ActionHash = env.dex(ALICE, "place_order", sell(10, 100)).await;
+    let far: ActionHash = env.dex(CAROL, "place_order", sell(50, 110)).await;
+    env.sync().await;
+
+    // Lots: 30 wanted, only the 10 at 1.00 are within 2% (limit 1.02).
+    let preview: dex_api::MarketPlan<ActionHash> = env
+        .dex(
+            BOB,
+            "preview_market_order",
+            dex_api::MarketPreviewRequest {
+                side: Side::Buy,
+                amount: dex_api::MarketAmount::Lots(30),
+                max_slippage_bps: None,
+            },
+        )
+        .await;
+    assert_eq!((preview.limit_price, preview.plan.filled, preview.plan.shortfall), (102, 10, 20));
+    assert_eq!(preview.max_slippage_bps, Some(200), "the default applies");
+
+    // Budget: 30.00 B buys the 10 lots at 1.00 and leaves 20.00 B unspent.
+    let result: MarketResult = env
+        .dex(
+            BOB,
+            "market_order_by_budget",
+            MarketBudgetRequest {
+                side: Side::Buy,
+                budget: 3_000,
+                max_slippage_bps: Some(200),
+                expected: Some(preview),
+            },
+        )
+        .await;
+    assert_eq!(result.parks.len(), 1);
+    assert_eq!(result.parks[0].escrow, near);
+    assert_eq!(result.plan.unspent_budget, Some(2_000));
+    assert!(result.changes.is_empty(), "same orders and lots as the preview");
+
+    run_makers(&env, &[ALICE, CAROL]).await;
+    let far_state: EscrowState = env.call(BOB, "get_escrow_state", far.clone()).await;
+    assert_eq!((far_state.remaining_lots, far_state.runs), (50, 0), "the far level is untouched");
+    let far_pending: Vec<ledger_api::PendingPark> = env.call(CAROL, "get_pending_parks", far).await;
+    assert!(far_pending.is_empty());
+    assert_eq!(env.balance(BOB).await.available, Amounts::new(1_000, 9_000));
+    assert_eq!(env.total_supply().await, minted);
+}
+
+/// Another taker empties the best level first. The market order's park there
+/// is refunded in full; the one retry fills the rest within the ORIGINAL
+/// limit, so a level only a fresh limit would reach stays untouched.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_raced_market_order_is_refunded_and_retried_within_its_original_limit() {
+    const DAVE: usize = 3;
+    let env = TestEnv::new(4).await;
+    let _: ActionHash = env.call(ALICE, "mint", Amounts::new(1_000, 0)).await;
+    let _: ActionHash = env.call(CAROL, "mint", Amounts::new(2_500, 0)).await;
+    let _: ActionHash = env.call(BOB, "mint", Amounts::new(0, 10_000)).await;
+    let _: ActionHash = env.call(DAVE, "mint", Amounts::new(0, 5_000)).await;
+    let minted = Amounts::new(3_500, 15_000);
+    let best: ActionHash = env.dex(ALICE, "place_order", sell(10, 120)).await;
+    let next: ActionHash = env.dex(CAROL, "place_order", sell(15, 121)).await;
+    let beyond: ActionHash = env.dex(CAROL, "place_order", sell(10, 124)).await;
+    env.sync().await;
+
+    // Dave takes the whole best level first.
+    let _: TakeResult = env
+        .dex(DAVE, "take", TakeRequest { take: Side::Buy, lots: 10, limit_price: Some(120) })
+        .await;
+    env.sync().await;
+    // Bob's market buy still sees it (parks do not change remaining lots).
+    let original: MarketResult = env.dex(BOB, "market_order", market(Side::Buy, 20)).await;
+    assert_eq!(original.plan.limit_price, 123, "ceil(1.20 × 1.02)");
+    let planned: Vec<(ActionHash, u64)> = original.parks.iter().map(|p| (p.escrow.clone(), p.lots)).collect();
+    assert_eq!(planned, vec![(best.clone(), 10), (next.clone(), 10)]);
+
+    // Alice fills Dave first (time priority) and refunds Bob; Carol fills Bob.
+    run_makers(&env, &[ALICE, CAROL]).await;
+    let parks: Vec<ParkStatus> = env.dex(BOB, "my_parks", ()).await;
+    let at_best = parks.iter().find(|p| p.escrow == best).unwrap();
+    assert_eq!(at_best.settlement.as_ref().map(|s| s.filled_lots), Some(0), "refunded in full");
+    assert_eq!(env.balance(BOB).await.available, Amounts::new(1_000, 10_000 - 1_210));
+
+    // Retry: 10 unfilled. The new best is 1.21, whose fresh 2% limit (1.24)
+    // would reach the 1.24 order; the original 1.23 limit does not.
+    let retry: MarketRetry = env
+        .dex(BOB, "retry_market_shortfall", RetryMarketRequest { original: original.clone() })
+        .await;
+    assert_eq!((retry.unfilled_lots, retry.still_pending), (10, 0));
+    let again = retry.result.expect("a retry plan");
+    assert_eq!(again.plan.limit_price, 123, "the original limit");
+    assert_eq!(again.parks.iter().map(|p| (p.escrow.clone(), p.lots)).collect::<Vec<_>>(), vec![(next, 5)]);
+    assert_eq!(again.plan.plan.shortfall, 5);
+    assert_eq!(again.attempt, 1);
+
+    // A retry cannot be retried.
+    let twice: ConductorApiResult<MarketRetry> = env
+        .dex_fallible(BOB, "retry_market_shortfall", RetryMarketRequest { original: again })
+        .await;
+    assert!(twice.is_err());
+
+    run_makers(&env, &[CAROL]).await;
+    let beyond_state: EscrowState = env.call(BOB, "get_escrow_state", beyond).await;
+    assert_eq!((beyond_state.remaining_lots, beyond_state.runs), (10, 0), "never reached");
+    assert_eq!(env.balance(BOB).await.available, Amounts::new(1_500, 10_000 - 1_815));
+    assert_eq!(env.total_supply().await, minted);
+}
+
+/// Symmetry: a market sell sweeps bids from the highest, paying in A.
+#[tokio::test(flavor = "multi_thread")]
+async fn market_sell_sweeps_bids() {
+    let env = TestEnv::new(3).await;
+    let _: ActionHash = env.call(ALICE, "mint", Amounts::new(0, 1_200)).await;
+    let _: ActionHash = env.call(CAROL, "mint", Amounts::new(0, 1_180)).await;
+    let _: ActionHash = env.call(BOB, "mint", Amounts::new(1_500, 0)).await;
+    let minted = Amounts::new(1_500, 2_380);
+    let high: ActionHash = env.dex(ALICE, "place_order", buy(10, 120)).await;
+    let low: ActionHash = env.dex(CAROL, "place_order", buy(10, 118)).await;
+    env.sync().await;
+
+    let result: MarketResult = env.dex(BOB, "market_order", market(Side::Sell, 15)).await;
+    assert_eq!(result.plan.limit_price, 117, "floor(1.20 × 0.98)");
+    let planned: Vec<(ActionHash, u64)> = result.parks.iter().map(|p| (p.escrow.clone(), p.lots)).collect();
+    assert_eq!(planned, vec![(high, 10), (low, 5)]);
+    assert_eq!(result.plan.plan.total_cost, Amounts::new(1_500, 0));
+    assert_eq!(result.plan.total_quote_minor, 1_200 + 590);
+
+    run_makers(&env, &[ALICE, CAROL]).await;
+    assert_eq!(env.balance(BOB).await.available, Amounts::new(0, 1_790));
+    assert_eq!(env.balance(ALICE).await.available, Amounts::new(1_000, 0));
+    assert_eq!(env.balance(CAROL).await.available, Amounts::new(500, 0));
+    assert_eq!(env.total_supply().await, minted);
+}
