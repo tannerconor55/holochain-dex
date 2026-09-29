@@ -1,0 +1,263 @@
+// The only place the UI talks to the conductor.
+//
+// Types are hand-mirrored from the Rust crates `ledger_api`, `dex_api` and
+// `dex_core` (field names are the msgpack wire format). Keep them in this one
+// file so drift is visible. On a serialization error, first rebuild the wasm
+// and repack (`nix develop -c ./build.sh`), then compare these types with the
+// Rust structs. Never bump msgpack/serde versions as a first response.
+
+import {
+  AdminWebsocket,
+  AppWebsocket,
+  CellType,
+  SignalType,
+  encodeHashToBase64,
+  type ActionHash,
+  type AgentPubKey,
+  type RoleNameCallZomeRequest,
+  type Signal,
+} from "@holochain/client";
+
+// ---------------------------------------------------------------------------
+// Wire types
+// ---------------------------------------------------------------------------
+
+/** A maker's side. For a taker, `Buy` takes asks and `Sell` takes bids. */
+export type Side = "Sell" | "Buy";
+export type RunMode = "Fill" | "Release";
+export type OrderStatus = "Open" | "Partial" | "Filled" | "Cancelled" | "Expired";
+
+/** Minor units of UNIT-A (`a`) and UNIT-B (`b`). */
+export interface Amounts {
+  a: number;
+  b: number;
+}
+
+export interface OrderTerms {
+  side: Side;
+  /** UNIT-B minor units per lot (one lot = 1.00 A). */
+  price_per_lot: number;
+  lots: number;
+  /** Microseconds since the epoch. */
+  expires_at: number;
+}
+
+export interface EscrowState {
+  escrow: ActionHash;
+  maker: AgentPubKey;
+  terms: OrderTerms;
+  opened_at: number;
+  locked: Amounts;
+  remaining_lots: number;
+  filled_lots: number;
+  runs: number;
+  expired: boolean;
+  closed: boolean;
+  released_at: number | null;
+}
+
+export interface PendingPark {
+  park: ActionHash;
+  taker: AgentPubKey;
+  amounts: Amounts;
+  requested_lots: number;
+  parked_at: number;
+}
+
+/** §23: total = available + locked + parked + uncollected. */
+export interface BalanceView {
+  available: Amounts;
+  locked_in_escrows: Amounts;
+  parked: Amounts;
+  uncollected: Amounts;
+  total: Amounts;
+}
+
+export interface RunReport {
+  run: ActionHash;
+  mode: RunMode;
+  filled_lots: number;
+  fills: { park: ActionHash; filled_lots: number }[];
+  locked: Amounts;
+  still_pending: number;
+  receivers: AgentPubKey[];
+}
+
+export interface ParkStatus {
+  park: ActionHash;
+  escrow: ActionHash;
+  amounts: Amounts;
+  requested_lots: number;
+  parked_at: number;
+  settlement: { run: ActionHash; filled_lots: number } | null;
+}
+
+export interface PriceLevel {
+  price_per_lot: number;
+  lots: number;
+  orders: number;
+}
+
+export interface BookView {
+  asks: PriceLevel[];
+  bids: PriceLevel[];
+  /** Best ask − best bid; negative when crossed. */
+  spread: number | null;
+}
+
+export interface Order {
+  id: ActionHash;
+  maker: AgentPubKey;
+  side: Side;
+  price_per_lot: number;
+  remaining_lots: number;
+  opened_at: number;
+  expires_at: number;
+  closed: boolean;
+}
+
+export interface PlannedFill {
+  order: ActionHash;
+  price_per_lot: number;
+  lots: number;
+  cost: Amounts;
+  receives: Amounts;
+}
+
+export interface TakePlan {
+  fills: PlannedFill[];
+  filled: number;
+  shortfall: number;
+  total_cost: Amounts;
+  total_receives: Amounts;
+}
+
+export interface TakeRequest {
+  take: Side;
+  lots: number;
+  limit_price: number | null;
+}
+
+export interface TakeResult {
+  plan: TakePlan;
+  parks: { escrow: ActionHash; park: ActionHash; lots: number }[];
+}
+
+export interface MyOrder {
+  state: EscrowState;
+  pending: PendingPark[];
+  status: OrderStatus;
+}
+
+export type DexSignal =
+  | { type: "park_placed"; escrow: ActionHash; park: ActionHash; taker: AgentPubKey; lots: number }
+  | { type: "run_settled"; escrow: ActionHash; run: ActionHash; maker: AgentPubKey; mode: RunMode };
+
+// ---------------------------------------------------------------------------
+// Calls
+// ---------------------------------------------------------------------------
+
+export const ROLE = "dex";
+
+/** The subset of `AppWebsocket` the API needs; stubbed in tests. */
+export interface ZomeClient {
+  readonly myPubKey: AgentPubKey;
+  callZome<T>(request: RoleNameCallZomeRequest): Promise<T>;
+  on(event: "signal", listener: (signal: Signal) => void): () => void;
+}
+
+export class DexApi {
+  constructor(private readonly client: ZomeClient) {}
+
+  get me(): AgentPubKey {
+    return this.client.myPubKey;
+  }
+
+  private call<T>(zome_name: "ledger" | "dex", fn_name: string, payload: unknown = null): Promise<T> {
+    return this.client.callZome<T>({ role_name: ROLE, zome_name, fn_name, payload });
+  }
+
+  // ledger: wallet
+  mint = (amounts: Amounts) => this.call<ActionHash>("ledger", "mint", amounts);
+  balance = () => this.call<BalanceView>("ledger", "get_balance");
+  collectAll = () => this.call<ActionHash[]>("ledger", "collect_all");
+
+  // dex: book
+  book = () => this.call<BookView>("dex", "get_order_book");
+  levelOrders = (side: Side, price_per_lot: number) =>
+    this.call<Order[]>("dex", "get_level_orders", { side, price_per_lot });
+  planTake = (request: TakeRequest) => this.call<TakePlan>("dex", "plan_take", request);
+
+  // dex: writes
+  placeOrder = (terms: OrderTerms) => this.call<ActionHash>("dex", "place_order", terms);
+  take = (request: TakeRequest) => this.call<TakeResult>("dex", "take", request);
+  cancelOrder = (escrow: ActionHash) => this.call<RunReport[]>("dex", "cancel_order", escrow);
+  runMyOrders = () => this.call<RunReport[]>("dex", "run_my_orders");
+
+  // dex: the caller's own view
+  myOrders = () => this.call<MyOrder[]>("dex", "my_orders");
+  myParks = () => this.call<ParkStatus[]>("dex", "my_parks");
+
+  /** Subscribe to dex signals from this cell; everything else is ignored. */
+  onSignal(listener: (signal: DexSignal) => void): () => void {
+    return this.client.on("signal", (signal) => {
+      const parsed = parseDexSignal(signal);
+      if (parsed) listener(parsed);
+    });
+  }
+}
+
+export function parseDexSignal(signal: Signal): DexSignal | null {
+  if (signal.type !== SignalType.App || signal.value.zome_name !== "dex") return null;
+  const payload = signal.value.payload as { type?: unknown } | null;
+  if (payload?.type === "park_placed" || payload?.type === "run_settled") {
+    return payload as DexSignal;
+  }
+  return null;
+}
+
+// ---------------------------------------------------------------------------
+// Identity helpers
+// ---------------------------------------------------------------------------
+
+export const b64 = (hash: Uint8Array): string => encodeHashToBase64(hash);
+
+/** A short, stable label for a hash: the last 6 base64 characters. */
+export const shortHash = (hash: Uint8Array): string => b64(hash).slice(-6);
+
+export const sameHash = (x: Uint8Array, y: Uint8Array): boolean =>
+  x.length === y.length && x.every((byte, i) => byte === y[i]);
+
+// ---------------------------------------------------------------------------
+// Connecting
+// ---------------------------------------------------------------------------
+
+/**
+ * Connect to the conductor.
+ *
+ * - Under `hc-spin` (`npm start`): the launcher injects the app port and token;
+ *   `AppWebsocket.connect()` picks them up.
+ * - Against a plain sandbox: open the page with `?admin_port=…&app_port=…`
+ *   (and optionally `&app_id=…`, default `dex`). A token is issued and
+ *   signing credentials authorized through the admin interface.
+ */
+export async function connect(search = window.location.search): Promise<DexApi> {
+  const params = new URLSearchParams(search);
+  const adminPort = params.get("admin_port");
+  const appPort = params.get("app_port");
+  if (!adminPort || !appPort) {
+    return new DexApi(await AppWebsocket.connect());
+  }
+
+  const appId = params.get("app_id") ?? "dex";
+  const admin = await AdminWebsocket.connect({ url: new URL(`ws://localhost:${adminPort}`) });
+  const { token } = await admin.issueAppAuthenticationToken({ installed_app_id: appId });
+  const client = await AppWebsocket.connect({ url: new URL(`ws://localhost:${appPort}`), token });
+  const info = await client.appInfo();
+  const cell = info?.cell_info[ROLE]?.find((c) => c.type === CellType.Provisioned);
+  if (!cell || cell.type !== CellType.Provisioned) {
+    throw new Error(`app ${appId} has no provisioned ${ROLE} cell`);
+  }
+  await admin.authorizeSigningCredentials(cell.value.cell_id);
+  return new DexApi(client);
+}

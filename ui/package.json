@@ -1,0 +1,33 @@
+{
+  "name": "dex-ui",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite --port 8888 --strictPort",
+    "agents": "hc-spin -n 2 --ui-port 8888 ../workdir/dex.happ",
+    "start": "concurrently -k -n ui,agents \"npm run dev\" \"npm run agents\"",
+    "build": "vite build",
+    "check": "svelte-check --tsconfig ./tsconfig.json",
+    "test": "vitest run",
+    "e2e": "playwright test"
+  },
+  "dependencies": {
+    "@holochain/client": "0.21.0"
+  },
+  "devDependencies": {
+    "@holochain/hc-spin": "0.700.0",
+    "@playwright/test": "^1.63.0",
+    "@sveltejs/vite-plugin-svelte": "^7.3.1",
+    "@tsconfig/svelte": "^5.0.8",
+    "concurrently": "^10.0.5",
+    "svelte": "^5.57.1",
+    "svelte-check": "^4.7.6",
+    "typescript": "~5.9.3",
+    "vite": "^8.3.1",
+    "vitest": "^5.0.2"
+  },
+  "overrides": {
+    "@holochain/client": "$@holochain/client"
+  }
+}
