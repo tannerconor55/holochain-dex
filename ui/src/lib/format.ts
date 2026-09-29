@@ -47,6 +47,28 @@ export function parseLots(text: string): number | null {
   return Number.isSafeInteger(n) && n > 0 ? n : null;
 }
 
+/**
+ * An exact rational price `quoteMinor / lots` (B minor units per lot) shown
+ * with `decimals` places, rounded half up, using integers only:
+ * (4800 + 2420) / 60 = 120.333… → "1.2033" at 4 places.
+ */
+export function formatAveragePrice(quoteMinor: number, lots: number, decimals = 4): string {
+  assertMinor(quoteMinor, "quote");
+  if (!Number.isSafeInteger(lots) || lots <= 0) return "—";
+  // Minor units carry 2 decimals already; scale by the extra places.
+  const extra = BigInt(10) ** BigInt(Math.max(0, decimals - 2));
+  const scaled = (BigInt(quoteMinor) * extra * 2n + BigInt(lots)) / (2n * BigInt(lots));
+  const unit = BigInt(10) ** BigInt(decimals);
+  const whole = scaled / unit;
+  const frac = (scaled % unit).toString().padStart(decimals, "0");
+  return `${Number(whole).toLocaleString("en-US")}.${frac}`;
+}
+
+/** Percent text with up to 2 decimals → basis points: "2" → 200, "0.5" → 50. */
+export function parseBps(text: string): number | null {
+  return parseAmount(text);
+}
+
 /** Timestamps from the zomes are microseconds since the epoch. */
 export function microsToDate(micros: number): Date {
   return new Date(Math.floor(micros / 1000));

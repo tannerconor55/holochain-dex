@@ -95,4 +95,55 @@ test("Alice sells, Bob takes 40, Alice cancels the rest", async ({ browser }) =>
   // For eyeballing the layout (test-results/ is gitignored).
   await alice.screenshot({ path: "test-results/alice.png", fullPage: true });
   await bob.screenshot({ path: "test-results/bob.png", fullPage: true });
+  // One open page per agent: two pages of one agent would race to settle.
+  await alice.context().close();
+  await bob.context().close();
+});
+
+// Continues from the demo's balances: Alice 60 A, Bob 152 B.
+test("market buy within 2% slippage, then its one retry", async ({ browser }) => {
+  const [aliceUrl, bobUrl] = urls as [string, string];
+  const alice = await (await browser.newContext()).newPage();
+  const bob = await (await browser.newContext()).newPage();
+  await alice.goto(aliceUrl);
+  await bob.goto(bobUrl);
+
+  // Alice rests 10 A at 1.20 and 10 A at 1.25.
+  const ticket = region(alice, "Place an order");
+  for (const price of ["1.20", "1.25"]) {
+    await ticket.getByLabel("Sell A").check();
+    await ticket.getByLabel("Price (B per A)").fill(price);
+    await ticket.getByLabel("Quantity (A)").fill("10");
+    await ticket.getByRole("button", { name: "Sell 10 A" }).click();
+    await expect(region(alice, "Activity")).toContainText(`sell 10 A @ ${price} B`);
+  }
+  const book = region(bob, "Order book");
+  await expect(book.getByRole("button", { name: "Buy from 1 order(s): 10 A at 1.25 B" })).toBeVisible();
+  await expect(book.getByRole("button", { name: "Buy from 1 order(s): 10 A at 1.20 B" })).toBeVisible();
+
+  // Bob: market buy 15 A at most 2% above 1.20 (limit 1.23).
+  const market = region(bob, "Place an order");
+  await market.getByText("Market", { exact: true }).click();
+  await market.getByLabel("Buy A now").check();
+  await market.getByLabel("Quantity (A)").fill("15");
+  await market.getByLabel("Max slippage (%)").fill("2");
+  await expect(market).toContainText("Only 10 of 15 lots are within 2% of the best price");
+  await expect(market).toContainText("1.2000 B"); // average
+  await market.getByRole("button", { name: "Market buy 10 A" }).click();
+
+  // Alice's page settles on the signal; the result fills in.
+  await expect(market).toContainText("filled 10 lots so far");
+  await expect(market).toContainText("5 lots were beyond your limit");
+  await market.getByRole("button", { name: "Retry remainder (5 lots)" }).click();
+  await expect(market).toContainText("Nothing is on the book within the original limit 1.23 B; 5 lots stay unfilled.");
+  await expect(market.getByRole("button", { name: /Retry remainder/ })).toHaveCount(0);
+
+  // The 1.25 level was never touched; Bob got 10 A for 12.00 B.
+  await expect(book.getByRole("button", { name: "Buy from 1 order(s): 10 A at 1.25 B" })).toBeVisible();
+  await expect(await balanceRow(bob, "Available")).toContainText("50.00");
+  await expect(await balanceRow(bob, "Available")).toContainText("140.00");
+
+  await bob.screenshot({ path: "test-results/bob-market.png", fullPage: true });
+  await alice.context().close();
+  await bob.context().close();
 });

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { assertMinor, formatAmount, formatExpiry, formatSigned, parseAmount, parseLots } from "./format";
+import { assertMinor, formatAmount, formatAveragePrice, formatExpiry, formatSigned, parseAmount, parseBps, parseLots } from "./format";
 
 describe("formatAmount", () => {
   it("formats minor units with two decimals", () => {
@@ -65,5 +65,25 @@ describe("formatExpiry", () => {
     expect(formatExpiry(now + 15 * 60 * 1e6, now)).toBe("in 15 min");
     expect(formatExpiry(now + 3 * 3600 * 1e6, now)).toBe("in 3 h");
     expect(formatExpiry(now, now)).toBe("expired");
+  });
+});
+
+describe("formatAveragePrice", () => {
+  it("shows an exact rational with integer rounding", () => {
+    expect(formatAveragePrice(4_800, 40)).toBe("1.2000");
+    expect(formatAveragePrice(4_800 + 2_420, 60)).toBe("1.2033"); // 120.333…
+    expect(formatAveragePrice(1_790, 15)).toBe("1.1933"); // 119.333…
+    expect(formatAveragePrice(2, 3)).toBe("0.0067"); // 0.6666… rounds half up
+    expect(formatAveragePrice(1_200, 10, 2)).toBe("1.20");
+    expect(formatAveragePrice(0, 0)).toBe("—");
+  });
+});
+
+describe("parseBps", () => {
+  it("reads a percentage as basis points", () => {
+    expect(parseBps("2")).toBe(200);
+    expect(parseBps("0.5")).toBe(50);
+    expect(parseBps("0")).toBe(0);
+    expect(parseBps("1.234")).toBeNull();
   });
 });

@@ -2,6 +2,7 @@
   import type { Side } from "../lib/api";
   import type { DexStore } from "../lib/dex.svelte";
   import { formatAmount, nowMicros, parseAmount, parseLots } from "../lib/format";
+  import MarketForm from "./MarketForm.svelte";
 
   let { store }: { store: DexStore } = $props();
 
@@ -12,6 +13,7 @@
     { label: "24 h", micros: 24 * 3600e6 },
   ];
 
+  let mode = $state<"limit" | "market">("limit");
   let side = $state<Side>("Sell");
   let price = $state("1.20");
   let quantity = $state("100");
@@ -48,7 +50,16 @@
 </script>
 
 <section class="panel" aria-labelledby="ticket-h">
-  <h2 id="ticket-h">Place an order</h2>
+  <div class="title">
+    <h2 id="ticket-h">Place an order</h2>
+    <div class="modes" role="radiogroup" aria-label="Order type">
+      <label class:selected={mode === "limit"}><input type="radio" name="mode" value="limit" bind:group={mode} />Limit</label>
+      <label class:selected={mode === "market"}><input type="radio" name="mode" value="market" bind:group={mode} />Market</label>
+    </div>
+  </div>
+  {#if mode === "market"}
+    <MarketForm {store} />
+  {:else}
   <form onsubmit={submit}>
     <div class="sides" role="radiogroup" aria-label="Side">
       {#each ["Sell", "Buy"] as const as s (s)}
@@ -79,9 +90,44 @@
       {side} {parseLots(quantity) ?? ""} A
     </button>
   </form>
+  {/if}
 </section>
 
 <style>
+  .title {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    gap: 0.5rem;
+  }
+  .modes {
+    display: flex;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    overflow: hidden;
+  }
+  .modes label {
+    flex-direction: row;
+    display: flex;
+    align-items: center;
+    padding: 0.2rem 0.7rem;
+    color: var(--text);
+    cursor: pointer;
+  }
+  .modes input {
+    position: absolute;
+    opacity: 0;
+    width: 1px;
+  }
+  .modes label.selected {
+    background: var(--accent);
+    color: var(--accent-text);
+    font-weight: 600;
+  }
+  .modes label:focus-within {
+    outline: 2px solid var(--focus);
+    outline-offset: -2px;
+  }
   form {
     display: grid;
     gap: 0.75rem;

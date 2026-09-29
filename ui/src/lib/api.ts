@@ -149,6 +149,45 @@ export interface MyOrder {
   status: OrderStatus;
 }
 
+/** Whole lots, or a budget of the paying asset (B to buy, A to sell). */
+export type MarketAmount = { Lots: number } | { Budget: number };
+
+/** dex_core::book::market::DEFAULT_MAX_SLIPPAGE_BPS */
+export const DEFAULT_MAX_SLIPPAGE_BPS = 200;
+
+export interface MarketPlan {
+  take: Side;
+  plan: TakePlan;
+  reference_price: number | null;
+  max_slippage_bps: number | null;
+  limit_price: number;
+  /** Average price = total_quote_minor / total_lots (B minor units per lot). */
+  total_quote_minor: number;
+  total_lots: number;
+  worst_price: number | null;
+  unspent_budget: number | null;
+}
+
+export interface FillChange {
+  order: ActionHash;
+  expected_lots: number;
+  planned_lots: number;
+}
+
+export interface MarketResult {
+  plan: MarketPlan;
+  parks: { escrow: ActionHash; park: ActionHash; lots: number }[];
+  changes: FillChange[];
+  /** 0 for the order, 1 for its one retry. */
+  attempt: number;
+}
+
+export interface MarketRetry {
+  unfilled_lots: number;
+  still_pending: number;
+  result: MarketResult | null;
+}
+
 export type DexSignal =
   | { type: "park_placed"; escrow: ActionHash; park: ActionHash; taker: AgentPubKey; lots: number }
   | { type: "run_settled"; escrow: ActionHash; run: ActionHash; maker: AgentPubKey; mode: RunMode };
@@ -193,6 +232,22 @@ export class DexApi {
   take = (request: TakeRequest) => this.call<TakeResult>("dex", "take", request);
   cancelOrder = (escrow: ActionHash) => this.call<RunReport[]>("dex", "cancel_order", escrow);
   runMyOrders = () => this.call<RunReport[]>("dex", "run_my_orders");
+
+  // dex: market orders (taker-only, immediate-or-cancel)
+  previewMarket = (side: Side, amount: MarketAmount, max_slippage_bps: number | null) =>
+    this.call<MarketPlan>("dex", "preview_market_order", { side, amount, max_slippage_bps });
+  marketOrder = (side: Side, amount: MarketAmount, max_slippage_bps: number | null, expected: MarketPlan | null) =>
+    "Lots" in amount
+      ? this.call<MarketResult>("dex", "market_order", { side, lots: amount.Lots, max_slippage_bps, expected })
+      : this.call<MarketResult>("dex", "market_order_by_budget", {
+          side,
+          budget: amount.Budget,
+          max_slippage_bps,
+          expected,
+        });
+  /** Once per market order: callers must not loop it. */
+  retryMarketShortfall = (original: MarketResult) =>
+    this.call<MarketRetry>("dex", "retry_market_shortfall", { original });
 
   // dex: the caller's own view
   myOrders = () => this.call<MyOrder[]>("dex", "my_orders");

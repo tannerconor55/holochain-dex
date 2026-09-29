@@ -54,6 +54,19 @@ describe("DexApi", () => {
     ]);
   });
 
+  it("routes market orders by amount kind and passes the slippage and preview", async () => {
+    const { client, calls } = stubClient();
+    const api = new DexApi(client);
+    await api.previewMarket("Buy", { Lots: 10 }, 200);
+    await api.marketOrder("Buy", { Lots: 10 }, 200, null);
+    await api.marketOrder("Sell", { Budget: 5_000 }, null, null);
+    expect(calls.map((c) => [c.fn_name, c.payload])).toEqual([
+      ["preview_market_order", { side: "Buy", amount: { Lots: 10 }, max_slippage_bps: 200 }],
+      ["market_order", { side: "Buy", lots: 10, max_slippage_bps: 200, expected: null }],
+      ["market_order_by_budget", { side: "Sell", budget: 5_000, max_slippage_bps: null, expected: null }],
+    ]);
+  });
+
   it("delivers only dex signals to listeners", () => {
     const { client, emit } = stubClient();
     const seen: string[] = [];
