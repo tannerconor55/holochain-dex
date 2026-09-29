@@ -12,11 +12,12 @@
 //! tiebreak [`crate::execute_run`] uses for parks.
 
 use crate::{Amounts, CoreError, OrderTerms, Side};
+use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
 
 /// One order as the book sees it. `P` is the order's id (the escrow's
 /// `ActionHash` in the zome), `K` the maker's identity.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OrderView<P, K> {
     pub id: P,
     pub maker: K,
@@ -50,14 +51,14 @@ impl<P, K> OrderView<P, K> {
 }
 
 /// All orders at one price on one side, merged.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PriceLevel {
     pub price_per_lot: u64,
     pub lots: u64,
     pub orders: usize,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BookView {
     /// Sell orders, best (lowest) price first.
     pub asks: Vec<PriceLevel>,
@@ -141,7 +142,7 @@ pub fn orders_at_level<P: Ord + Clone, K: Clone>(
 }
 
 /// One order a taker should park against, and exactly what to park.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PlannedFill<P> {
     pub order: P,
     pub price_per_lot: u64,
@@ -152,7 +153,7 @@ pub struct PlannedFill<P> {
     pub receives: Amounts,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TakePlan<P> {
     /// Orders to park against, in the order they were chosen.
     pub fills: Vec<PlannedFill<P>>,
@@ -228,6 +229,42 @@ pub fn plan_take<P: Ord + Clone, K: PartialEq>(
         });
     }
     Ok(plan)
+}
+
+/// An order's lifecycle as shown to its maker.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum OrderStatus {
+    /// Live, nothing filled yet.
+    Open,
+    /// Live, some lots filled.
+    Partial,
+    /// Every lot sold (or bought).
+    Filled,
+    /// Released by the maker before expiry.
+    Cancelled,
+    /// Past expiry: released after it, or awaiting the maker's release.
+    Expired,
+}
+
+/// Status from ledger state. `released_at` is the timestamp (µs) of the
+/// escrow's first `Release` run, if any.
+pub fn order_status(
+    lots: u64,
+    filled_lots: u64,
+    expires_at: i64,
+    released_at: Option<i64>,
+    now: i64,
+) -> OrderStatus {
+    if filled_lots >= lots {
+        return OrderStatus::Filled;
+    }
+    match released_at {
+        Some(at) if at >= expires_at => OrderStatus::Expired,
+        Some(_) => OrderStatus::Cancelled,
+        None if now >= expires_at => OrderStatus::Expired,
+        None if filled_lots > 0 => OrderStatus::Partial,
+        None => OrderStatus::Open,
+    }
 }
 
 #[cfg(test)]

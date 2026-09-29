@@ -289,3 +289,17 @@ fn randomised_plans_never_exceed_the_request_or_any_level() {
         }
     }
 }
+
+#[test]
+fn order_status_follows_fills_release_and_expiry() {
+    use OrderStatus::*;
+    let status = |filled, released_at, now| order_status(100, filled, LATER, released_at, now);
+    assert_eq!(status(0, None, NOW), Open);
+    assert_eq!(status(40, None, NOW), Partial);
+    assert_eq!(status(100, None, NOW), Filled);
+    assert_eq!(status(100, Some(NOW), NOW), Filled, "a release after a full fill returns nothing");
+    assert_eq!(status(0, Some(NOW), NOW), Cancelled);
+    assert_eq!(status(40, Some(NOW), LATER + 5), Cancelled, "cancelled before expiry stays cancelled");
+    assert_eq!(status(40, None, LATER), Expired, "expired, awaiting release");
+    assert_eq!(status(0, Some(LATER), LATER + 5), Expired, "released at or after expiry");
+}
