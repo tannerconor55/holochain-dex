@@ -1,0 +1,8 @@
+[package]
+name = "dex_core"
+version = "0.1.0"
+edition = "2021"
+description = "Pure, deterministic DEX settlement logic shared by validation and coordinator code"
+
+[dependencies]
+serde = { workspace = true }

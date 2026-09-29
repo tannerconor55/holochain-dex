@@ -1,0 +1,6 @@
+/target
+tests/sweettest/target
+*.dna
+*.happ
+.hc*
+result

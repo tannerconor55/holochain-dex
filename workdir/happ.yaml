@@ -1,0 +1,13 @@
+manifest_version: "0"
+name: dex
+description: "Peer-to-peer UNIT-A / UNIT-B limit-order DEX (MVP, mock Unyt ledger)"
+roles:
+  - name: dex
+    provisioning:
+      strategy: create
+      deferred: false
+    dna:
+      path: ../dnas/dex/workdir/dex.dna
+      modifiers:
+        network_seed: null
+        properties: null
