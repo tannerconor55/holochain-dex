@@ -268,3 +268,36 @@ below). **Commit:** UI in its own commits, separate from any zome change.
 6. `Add Sweettest cases for order book and edge cases`
 7. `ui:` scaffold, api layer, wallet, book, ticket, take flow, my orders, activity
 8. README update (status table, limitations, how to run two agents)
+
+## Status (2026-09-29)
+
+Done, on branch `order-book`: steps 1–7 above, with one addition before
+Phase 3: an upgrade to Holochain 0.7 (`hdk 0.7.0` / `hdi 0.8.0`). Step 8 is
+done as part of the market-order docs.
+
+Not done / open:
+- A test for a run that omits the oldest park: needs a hook that commits a
+  hand-picked run (validation accepts it by design).
+- Demo step 6 (1-minute expiry, two-taker race) is covered in Sweettest, not
+  in the Playwright script.
+- Rhai Smart Agreement template (a later plan).
+
+## Market orders — done
+
+Taker-only, immediate-or-cancel, slippage-limited sweeps (see README
+"Market orders"). No ledger, integrity or `dna.yaml` change; the DNA hash is
+unchanged.
+
+1. `Add market order planning to dex_core::book`: `plan_market`,
+   `plan_market_by_budget`, `plan_with_limit` on top of `plan_take`.
+2. `Add market order externs`: `preview_market_order`, `market_order`,
+   `market_order_by_budget`, `retry_market_shortfall` (once, original limit).
+3. `Add market order Sweettests`: two-level sweep, slippage cut-off with a
+   budget, race + retry within the original limit, market sell.
+4. `ui: market orders`: Limit / Market toggle, preview, result panel with a
+   one-time "Retry remainder".
+5. `Document market orders`.
+
+Open question: the limit formulas round buy up and sell down, which loosens
+the limit by up to one minor unit per lot. Flip to buy floor / sell ceil if
+the limit must never exceed the stated slippage.

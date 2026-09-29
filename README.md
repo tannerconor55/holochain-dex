@@ -11,13 +11,14 @@ Spec documents: *DEX MVP Protocol v0.1* and *Smart Agreement Plan v0.1*.
 
 | Piece | State |
 |---|---|
-| `dex_core`: settlement logic, order book views, listing tags, order status | Done. 36 unit tests. |
+| `dex_core`: settlement logic, order book views, listing tags, order status, market planning | Done. 48 unit tests. |
 | `ledger_integrity` / `ledger` (mock Unyt ledger) | Done. Runs on holochain 0.7.0. |
 | `dex_integrity`: listing links, validated against the escrow | Done. Wrong tag and wrong author rejected in a conductor. |
 | `dex` coordinator: listing, book, take planning, maker settlement | Done. |
 | Signals (`park_placed`, `run_settled`) and maker auto-run | Done; the UI drives the auto-run. |
-| Sweettest suite | 12 tests pass (~15 min; each test starts its own conductors). |
-| UI (`ui/`): wallet, book, ticket, take flow, my orders, activity | Done. 13 Vitest tests; the demo script passes in Playwright against two real conductors. |
+| Market orders (taker-only, IOC, slippage-limited; by lots or budget; one retry) | Done: `dex_core`, `dex` externs, UI. See [Market orders](#market-orders). |
+| Sweettest suite | 16 tests pass (~20 min; each test starts its own conductors). |
+| UI (`ui/`): wallet, book, limit and market ticket, take flow, my orders, activity | Done. 16 Vitest tests; Playwright runs the demo and a market order against two real conductors. |
 | Rhai Smart Agreement template for real Unyt | Later; port of `dex_core::execute_run`. |
 
 ## Layout
@@ -72,6 +73,11 @@ nix develop .. -c npm start
 # and open the two URLs the script prints (?admin_port=…&app_port=…).
 nix develop -c ./scripts/sandbox.sh
 
+# More agents: either launcher takes AGENTS (sandbox: up to 10, named
+# alice, bob, carol, …; app ports 8801, 8802, …).
+AGENTS=3 nix develop .. -c npm start
+AGENTS=3 nix develop -c ./scripts/sandbox.sh
+
 nix develop .. -c npm test          # Vitest: amounts, API layer, signal parsing
 nix develop .. -c npm run check     # svelte-check
 nix develop .. -c npm run e2e       # Playwright: the demo script in two tabs
@@ -118,12 +124,48 @@ Integer minor units only, never floats. Both assets have 2 decimals. One lot is
 1.00 A (`LOT_SIZE_A = 100`). Price is `price_per_lot` in B minor units:
 1.20 B per A is `120`. Quote = `lots × price_per_lot`.
 
+## Market orders
+
+A market order is a **taker action only**: the client plans a sweep of resting
+orders from the best price and parks against each through the same path as a
+limit take. There is no market-order entry, no ledger change and no
+validation change.
+
+* **Immediate-or-cancel.** A market order never rests on the book. Whatever the
+  makers' runs cannot fill (someone else got there first, the order expired) is
+  refunded by those runs.
+* **Fills settle per maker.** Each maker's client runs its own order, at the
+  maker's own limit price, when it next runs (on the `park_placed` signal or its
+  poll). A sweep across three makers settles in up to three separate steps and
+  can arrive partially, not all at once.
+* **Slippage is a client-side limit.** `max_slippage_bps` (default 200 = 2%)
+  turns the best price the taker can hit (live orders, not their own) into a
+  limit: buy `ceil(best × (10000 + bps) / 10000)`, sell
+  `floor(best × (10000 − bps) / 10000)`, integer maths only. The limit decides
+  which orders the taker parks against; validation knows nothing about it and
+  does not enforce it. Note that these roundings loosen the limit by up to one
+  minor unit per lot (a buy at best 1.20 with 2% may pay up to 1.23, not 1.224).
+* **Cross-maker priority is chosen by the taker's client**, best price then
+  oldest, the same as a limit take. Nothing forces another client to do the same.
+* **Amount:** whole lots, or a budget of the paying asset (B to buy, A to sell)
+  spent on whole lots without ever exceeding it. The plan reports per-order
+  lots and cost, the average price as an exact rational
+  (`total_quote_minor / total_lots`), the worst price and any shortfall.
+* **One retry.** `retry_market_shortfall` re-plans only the lots known to be
+  unfilled (the original shortfall plus refunded parks) against the fresh
+  book, within the **original** limit price, never one derived from the moved
+  book. A retry cannot itself be retried; the UI offers it once, after every
+  maker has settled.
+
+Externs: `preview_market_order`, `market_order`, `market_order_by_budget`,
+`retry_market_shortfall`. Planning: `dex_core::book::market`.
+
 ## Known limitations (MVP, by design)
 
 * **Maker liveness.** Fills only settle when the maker's node runs the escrow.
   A taker's parked funds wait until the maker's next run (fill, release or
-  refund). Mitigation planned: presence handshake before parking, and the
-  maker's client running fills automatically while online.
+  refund). The maker's client settles automatically while its app is open;
+  a maker who closes the app leaves takers waiting until they return.
 * **Maker-asserted time.** A run's timestamp is the maker's own action
   timestamp, as Unyt's `executed_timestamp` is the executor's. Expiry protects
   the maker, so this is acceptable. If an order expires in the instant between
@@ -136,8 +178,8 @@ Integer minor units only, never floats. Both assets have 2 decimals. One lot is
   force it.
 * **Mint is an open faucet** (capped per call). Test assets only.
 * **Chain walks are O(chain length).** Fine for a demo; the real ledger is Unyt.
-* **Reads always use the network.** Whether phones (zero-arc nodes) need an
-  explicit local/network choice is still an open decision.
+* **Reads always use the network.** v1 targets desktop full-arc nodes only; phones
+  (zero-arc nodes) would need an explicit local/network choice on every read.
 
 ## Swapping in real Unyt
 
