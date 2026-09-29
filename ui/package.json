@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "vite --port 8888 --strictPort",
-    "agents": "hc-spin -n 2 --ui-port 8888 ../workdir/dex.happ",
+    "agents": "env -u ELECTRON_RUN_AS_NODE XDG_SESSION_TYPE=x11 hc-spin -n ${AGENTS:-2} --ui-port 8888 ../workdir/dex.happ",
     "start": "concurrently -k -n ui,agents \"npm run dev\" \"npm run agents\"",
     "build": "vite build",
     "check": "svelte-check --tsconfig ./tsconfig.json",
