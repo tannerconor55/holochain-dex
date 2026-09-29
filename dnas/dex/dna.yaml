@@ -19,3 +19,9 @@ coordinator:
       path: ../../target/wasm32-unknown-unknown/release/ledger.wasm
       dependencies:
         - name: ledger_integrity
+    # Order book: listing, book reads, take planning. Settles only through
+    # `call`s to the ledger zome.
+    - name: dex
+      path: ../../target/wasm32-unknown-unknown/release/dex.wasm
+      dependencies:
+        - name: dex_integrity

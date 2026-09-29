@@ -1,0 +1,13 @@
+[package]
+name = "dex_api"
+version = "0.1.0"
+edition = "2021"
+description = "Input and output types of the dex zome's externs"
+
+# Like ledger_api: shared by the dex coordinator and the Sweettest suite
+# without linking any zome's exports.
+[dependencies]
+hdi = { workspace = true }
+serde = { workspace = true }
+dex_core = { workspace = true }
+ledger_api = { workspace = true }

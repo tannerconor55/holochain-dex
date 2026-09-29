@@ -9,12 +9,13 @@
 // also makes (for doctests) reports every fixture as dead code.
 #![cfg(test)]
 
+use dex_api::{BookView, MyOrder, OrderStatus, PriceLevel, RawListing, TakePlan, TakeRequest, TakeResult};
 use holochain::prelude::*;
 use holochain::conductor::api::error::ConductorApiResult;
 use holochain::sweettest::*;
 use ledger_api::{
-    Amounts, BalanceView, EscrowState, OrderTerms, ParkRequest, RunEscrowInput, RunMode, RunReport,
-    Side,
+    Amounts, BalanceView, EscrowState, OrderTerms, ParkRequest, ParkStatus, RunEscrowInput,
+    RunMode, RunReport, Side,
 };
 use serde::Serialize;
 use std::path::PathBuf;
@@ -60,15 +61,26 @@ impl TestEnv {
         Self { conductors, agents }
     }
 
-    async fn call<I, O>(&self, agent: usize, f: &str, input: I) -> O
+    async fn zome_call<I, O>(&self, agent: usize, zome: &str, f: &str, input: I) -> ConductorApiResult<O>
     where
         I: Serialize + std::fmt::Debug,
         O: serde::de::DeserializeOwned + std::fmt::Debug,
     {
         let a = &self.agents[agent];
         self.conductors[a.conductor]
-            .call(&a.cell.zome("ledger"), f, input)
+            .call_fallible(&a.cell.zome(zome), f, input)
             .await
+    }
+
+    /// Call a `ledger` extern, panicking on error.
+    async fn call<I, O>(&self, agent: usize, f: &str, input: I) -> O
+    where
+        I: Serialize + std::fmt::Debug,
+        O: serde::de::DeserializeOwned + std::fmt::Debug,
+    {
+        self.zome_call(agent, "ledger", f, input)
+            .await
+            .unwrap_or_else(|e| panic!("ledger.{f} failed: {e:?}"))
     }
 
     async fn call_fallible<I, O>(&self, agent: usize, f: &str, input: I) -> ConductorApiResult<O>
@@ -76,10 +88,39 @@ impl TestEnv {
         I: Serialize + std::fmt::Debug,
         O: serde::de::DeserializeOwned + std::fmt::Debug,
     {
-        let a = &self.agents[agent];
-        self.conductors[a.conductor]
-            .call_fallible(&a.cell.zome("ledger"), f, input)
+        self.zome_call(agent, "ledger", f, input).await
+    }
+
+    /// Call a `dex` extern, panicking on error.
+    async fn dex<I, O>(&self, agent: usize, f: &str, input: I) -> O
+    where
+        I: Serialize + std::fmt::Debug,
+        O: serde::de::DeserializeOwned + std::fmt::Debug,
+    {
+        self.zome_call(agent, "dex", f, input)
             .await
+            .unwrap_or_else(|e| panic!("dex.{f} failed: {e:?}"))
+    }
+
+    async fn dex_fallible<I, O>(&self, agent: usize, f: &str, input: I) -> ConductorApiResult<O>
+    where
+        I: Serialize + std::fmt::Debug,
+        O: serde::de::DeserializeOwned + std::fmt::Debug,
+    {
+        self.zome_call(agent, "dex", f, input).await
+    }
+
+    async fn book(&self, agent: usize) -> BookView {
+        self.dex(agent, "get_order_book", ()).await
+    }
+
+    /// Σ `BalanceView.total` over every agent. Must equal what was minted.
+    async fn total_supply(&self) -> Amounts {
+        let mut total = Amounts::ZERO;
+        for agent in 0..self.agents.len() {
+            total = total.checked_add(self.balance(agent).await.total).unwrap();
+        }
+        total
     }
 
     async fn sync(&self) {
@@ -290,4 +331,173 @@ async fn only_the_maker_can_run_the_escrow() {
         )
         .await;
     assert!(result.is_err());
+}
+
+// ---------------------------------------------------------------------------
+// Order book (dex zome)
+// ---------------------------------------------------------------------------
+
+fn level(price_per_lot: u64, lots: u64, orders: usize) -> PriceLevel {
+    PriceLevel {
+        price_per_lot,
+        lots,
+        orders,
+    }
+}
+
+fn sell(lots: u64, price_per_lot: u64) -> OrderTerms {
+    OrderTerms {
+        side: Side::Sell,
+        price_per_lot,
+        lots,
+        expires_at: in_one_hour(),
+    }
+}
+
+/// A placed order is visible to other agents; cancelling removes it.
+#[tokio::test(flavor = "multi_thread")]
+async fn placed_order_shows_in_the_book_until_cancelled() {
+    let env = TestEnv::new(2).await;
+    let _: ActionHash = env.call(ALICE, "mint", Amounts::new(10_000, 0)).await;
+    let escrow: ActionHash = env.dex(ALICE, "place_order", sell_100_at_1_20()).await;
+    env.sync().await;
+
+    let book = env.book(BOB).await;
+    assert_eq!(book.asks, vec![level(120, 100, 1)], "Bob sees 1.20 · 100");
+    assert!(book.bids.is_empty());
+    assert_eq!(book.spread, None);
+
+    let reports: Vec<RunReport> = env.dex(ALICE, "cancel_order", escrow).await;
+    assert_eq!(reports.len(), 1);
+    env.sync().await;
+    env.collect(ALICE).await;
+
+    assert!(env.book(BOB).await.asks.is_empty(), "a cancelled order leaves the book");
+    assert_eq!(env.balance(ALICE).await.available, Amounts::new(10_000, 0));
+    let mine: Vec<MyOrder> = env.dex(ALICE, "my_orders", ()).await;
+    assert_eq!(mine[0].status, OrderStatus::Cancelled);
+}
+
+/// Validation recomputes the listing tag from the escrow's terms.
+#[tokio::test(flavor = "multi_thread")]
+async fn listing_with_a_tag_that_disagrees_with_the_escrow_is_rejected() {
+    let env = TestEnv::new(2).await;
+    let _: ActionHash = env.call(ALICE, "mint", Amounts::new(10_000, 0)).await;
+    // An escrow opened through the ledger directly is not listed yet.
+    let escrow: ActionHash = env.call(ALICE, "open_escrow", sell_100_at_1_20()).await;
+    let terms = env.call::<_, EscrowState>(ALICE, "get_escrow_state", escrow.clone()).await.terms;
+
+    let mut cheaper = terms;
+    cheaper.price_per_lot = 110;
+    let mut other_side = terms;
+    other_side.side = Side::Buy;
+    let mut later = terms;
+    later.expires_at += 1;
+    let good = dex_core::listing::encode_tag(&terms);
+    let bad_tags = [
+        ("price", dex_core::listing::encode_tag(&cheaper)),
+        ("side", dex_core::listing::encode_tag(&other_side)),
+        ("expiry", dex_core::listing::encode_tag(&later)),
+        ("truncated", good[..16].to_vec()),
+    ];
+    for (what, tag) in bad_tags {
+        let result: ConductorApiResult<ActionHash> = env
+            .dex_fallible(ALICE, "list_escrow_raw", RawListing { escrow: escrow.clone(), tag })
+            .await;
+        assert!(result.is_err(), "a listing with the wrong {what} must be rejected");
+    }
+
+    // Control: the escrow's own tag passes, so the rejections above are about
+    // the tag and the cross-zome escrow decode works.
+    let _: ActionHash = env
+        .dex(ALICE, "list_escrow_raw", RawListing { escrow: escrow.clone(), tag: good })
+        .await;
+    env.sync().await;
+    assert_eq!(env.book(BOB).await.asks, vec![level(120, 100, 1)]);
+}
+
+/// Only an escrow's maker may list it.
+#[tokio::test(flavor = "multi_thread")]
+async fn only_the_maker_can_list_an_escrow() {
+    let env = TestEnv::new(2).await;
+    let _: ActionHash = env.call(ALICE, "mint", Amounts::new(10_000, 0)).await;
+    let escrow: ActionHash = env.call(ALICE, "open_escrow", sell_100_at_1_20()).await;
+    env.sync().await;
+
+    let result: ConductorApiResult<ActionHash> =
+        env.dex_fallible(BOB, "republish_listing", escrow.clone()).await;
+    assert!(result.is_err(), "Bob cannot list Alice's escrow");
+    assert!(env.book(BOB).await.asks.is_empty());
+
+    let _: ActionHash = env.dex(ALICE, "republish_listing", escrow).await;
+    env.sync().await;
+    assert_eq!(env.book(BOB).await.asks, vec![level(120, 100, 1)]);
+}
+
+/// §13: a 60 A buy takes Alice's 40 at 1.20, then 20 of Carol's 35 at 1.21.
+/// Each maker settles their own order; balances and supply are conserved.
+#[tokio::test(flavor = "multi_thread")]
+async fn take_across_two_orders_is_settled_by_each_maker() {
+    let env = TestEnv::new(3).await;
+    let _: ActionHash = env.call(ALICE, "mint", Amounts::new(4_000, 0)).await;
+    let _: ActionHash = env.call(CAROL, "mint", Amounts::new(3_500, 0)).await;
+    let _: ActionHash = env.call(BOB, "mint", Amounts::new(0, 20_000)).await;
+    let minted = Amounts::new(7_500, 20_000);
+
+    let alice_order: ActionHash = env.dex(ALICE, "place_order", sell(40, 120)).await;
+    let carol_order: ActionHash = env.dex(CAROL, "place_order", sell(35, 121)).await;
+    env.sync().await;
+    assert_eq!(env.book(BOB).await.asks, vec![level(120, 40, 1), level(121, 35, 1)]);
+
+    let request = TakeRequest {
+        take: Side::Buy,
+        lots: 60,
+        limit_price: None,
+    };
+    let preview: TakePlan<ActionHash> = env.dex(BOB, "plan_take", request.clone()).await;
+    let planned: Vec<(ActionHash, u64)> = preview.fills.iter().map(|f| (f.order.clone(), f.lots)).collect();
+    assert_eq!(planned, vec![(alice_order.clone(), 40), (carol_order.clone(), 20)]);
+    assert_eq!(preview.total_cost, Amounts::new(0, 4_800 + 2_420));
+
+    let taken: TakeResult = env.dex(BOB, "take", request).await;
+    assert_eq!(taken.plan, preview, "nothing changed between preview and take");
+    assert_eq!(taken.parks.len(), 2);
+    env.sync().await;
+    assert_eq!(env.total_supply().await, minted, "parking moves funds, never creates them");
+
+    // Each maker's client settles its own order.
+    for (maker, filled) in [(ALICE, 40), (CAROL, 20)] {
+        let reports: Vec<RunReport> = env.dex(maker, "run_my_orders", ()).await;
+        assert_eq!(reports.len(), 1);
+        assert_eq!(reports[0].filled_lots, filled);
+    }
+    env.sync().await;
+    for agent in [ALICE, BOB, CAROL] {
+        env.collect(agent).await;
+    }
+    env.sync().await;
+
+    assert_eq!(env.balance(BOB).await.available, Amounts::new(6_000, 20_000 - 7_220));
+    assert_eq!(env.balance(ALICE).await.available, Amounts::new(0, 4_800));
+    let carol = env.balance(CAROL).await;
+    assert_eq!(carol.available, Amounts::new(0, 2_420));
+    assert_eq!(carol.locked_in_escrows, Amounts::new(1_500, 0));
+    assert_eq!(env.total_supply().await, minted);
+
+    assert_eq!(env.book(BOB).await.asks, vec![level(121, 15, 1)], "Alice's order is gone");
+    let alice: Vec<MyOrder> = env.dex(ALICE, "my_orders", ()).await;
+    assert_eq!(alice[0].status, OrderStatus::Filled);
+    let carol: Vec<MyOrder> = env.dex(CAROL, "my_orders", ()).await;
+    assert_eq!(carol[0].status, OrderStatus::Partial);
+
+    // Running again is a no-op.
+    let again: Vec<RunReport> = env.dex(ALICE, "run_my_orders", ()).await;
+    assert!(again.is_empty());
+
+    let parks: Vec<ParkStatus> = env.dex(BOB, "my_parks", ()).await;
+    let fills: Vec<(ActionHash, Option<u64>)> = parks
+        .iter()
+        .map(|p| (p.escrow.clone(), p.settlement.as_ref().map(|s| s.filled_lots)))
+        .collect();
+    assert_eq!(fills, vec![(carol_order, Some(20)), (alice_order, Some(40))], "newest first");
 }

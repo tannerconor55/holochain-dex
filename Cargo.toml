@@ -3,9 +3,11 @@ resolver = "2"
 members = [
     "crates/dex_core",
     "crates/ledger_api",
+    "crates/dex_api",
     "dnas/dex/zomes/integrity/ledger",
     "dnas/dex/zomes/integrity/dex",
     "dnas/dex/zomes/coordinator/ledger",
+    "dnas/dex/zomes/coordinator/dex",
 ]
 # The Sweettest crate pulls in the whole `holochain` conductor and is built
 # separately (see README), so it is not a default workspace member.
@@ -20,6 +22,7 @@ holochain_serialized_bytes = "=0.0.57"
 
 dex_core = { path = "crates/dex_core" }
 ledger_api = { path = "crates/ledger_api" }
+dex_api = { path = "crates/dex_api" }
 ledger_integrity = { path = "dnas/dex/zomes/integrity/ledger" }
 dex_integrity = { path = "dnas/dex/zomes/integrity/dex" }
 

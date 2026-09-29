@@ -196,6 +196,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "dex"
+version = "0.1.0"
+dependencies = [
+ "dex_api",
+ "dex_core",
+ "dex_integrity",
+ "hdk",
+ "ledger_api",
+ "serde",
+]
+
+[[package]]
+name = "dex_api"
+version = "0.1.0"
+dependencies = [
+ "dex_core",
+ "hdi",
+ "ledger_api",
+ "serde",
+]
+
+[[package]]
 name = "dex_core"
 version = "0.1.0"
 dependencies = [

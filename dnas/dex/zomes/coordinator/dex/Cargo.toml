@@ -1,0 +1,20 @@
+[package]
+name = "dex"
+version = "0.1.0"
+edition = "2021"
+description = "DEX order book: listing, book reads, take planning; settles through the ledger zome"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+name = "dex"
+
+# Depends on dex_integrity only. Depending on ledger_integrity too would link
+# two `validate` exports into one wasm, and the dex zome must not touch
+# ledger entries anyway: every settlement goes through `call` to `ledger`.
+[dependencies]
+hdk = { workspace = true }
+serde = { workspace = true }
+dex_core = { workspace = true }
+dex_api = { workspace = true }
+ledger_api = { workspace = true }
+dex_integrity = { workspace = true }
