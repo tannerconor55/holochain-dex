@@ -16,7 +16,7 @@ README.md for design, invariants and known limitations. Use the `holochain`,
 
 ## Rules
 
-- Pinned: `hdk =0.6.3`, `hdi =0.7.3`, `holochain =0.6.3`. Verify HDK/HDI APIs
+- Pinned: `hdk =0.7.0`, `hdi =0.8.0`, `holochain =0.7.0` (holonix `main-0.7`). Verify HDK/HDI APIs
   against the pinned crate source or docs.rs at that version, never from memory.
 - `dnas/dex/zomes/integrity/**` and `dnas/dex/dna.yaml` change the DNA hash.
   Flag it in every change; commit integrity changes separately.

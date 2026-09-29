@@ -141,39 +141,38 @@ macro_rules! ensure {
 #[hdk_extern]
 pub fn validate(op: Op) -> ExternResult<ValidateCallbackResult> {
     match op.flattened::<EntryTypes, LinkTypes>()? {
-        FlatOp::StoreRecord(OpRecord::CreateEntry { app_entry, action }) => {
+        FlatOp::CreateRecord(OpRecord::CreateEntry { app_entry, action })
+        | FlatOp::CreateEntry(OpEntry::CreateEntry { app_entry, action }) => {
             validate_create(app_entry, &action)
         }
-        FlatOp::StoreEntry(OpEntry::CreateEntry { app_entry, action }) => {
-            validate_create(app_entry, &action)
-        }
-        FlatOp::StoreRecord(OpRecord::UpdateEntry { .. })
-        | FlatOp::StoreEntry(OpEntry::UpdateEntry { .. })
-        | FlatOp::StoreRecord(OpRecord::DeleteEntry { .. }) => {
+        FlatOp::CreateRecord(OpRecord::UpdateEntry { .. })
+        | FlatOp::CreateEntry(OpEntry::UpdateEntry { .. })
+        | FlatOp::CreateRecord(OpRecord::DeleteEntry { .. }) => {
             invalid("ledger entries are immutable")
         }
-        FlatOp::StoreRecord(OpRecord::CreateLink {
-            base_address,
-            target_address,
-            link_type,
-            action,
-            ..
-        })
-        | FlatOp::RegisterCreateLink {
-            base_address,
-            target_address,
-            link_type,
-            action,
-            ..
-        } => validate_create_link(link_type, base_address, target_address, &action),
-        FlatOp::StoreRecord(OpRecord::DeleteLink { .. }) | FlatOp::RegisterDeleteLink { .. } => {
+        FlatOp::CreateRecord(OpRecord::CreateLink { link_type, action })
+        | FlatOp::Link(OpLink::CreateLink { link_type, action }) => {
+            validate_create_link(link_type, &action)
+        }
+        FlatOp::CreateRecord(OpRecord::DeleteLink { .. }) | FlatOp::Link(OpLink::DeleteLink { .. }) => {
             invalid("ledger links are permanent")
         }
         _ => valid(),
     }
 }
 
-fn validate_create(entry: EntryTypes, action: &Create) -> ExternResult<ValidateCallbackResult> {
+type CreateAction = TypedAction<CreateData>;
+
+/// The action before this one. Every app entry follows genesis, so a missing
+/// `prev_action` is a malformed op, not an invalid one.
+fn prev_action<D>(action: &TypedAction<D>) -> ExternResult<ActionHash> {
+    action
+        .prev_action()
+        .cloned()
+        .ok_or_else(|| wasm_error!(WasmErrorInner::Guest("app action has no prev_action".into())))
+}
+
+fn validate_create(entry: EntryTypes, action: &CreateAction) -> ExternResult<ValidateCallbackResult> {
     match entry {
         EntryTypes::Mint(mint) => validate_mint(&mint),
         EntryTypes::Escrow(escrow) => validate_escrow(&escrow, action),
@@ -192,19 +191,19 @@ fn validate_mint(mint: &Mint) -> ExternResult<ValidateCallbackResult> {
     valid()
 }
 
-fn validate_escrow(escrow: &Escrow, action: &Create) -> ExternResult<ValidateCallbackResult> {
+fn validate_escrow(escrow: &Escrow, action: &CreateAction) -> ExternResult<ValidateCallbackResult> {
     if let Err(e) = escrow.terms.validate() {
         return invalid(e.to_string());
     }
     ensure!(
-        escrow.terms.expires_at > action.timestamp.as_micros(),
+        escrow.terms.expires_at > action.timestamp().as_micros(),
         "escrow must expire after it is created"
     );
     let lock = escrow.terms.initial_lock().map_err(core_err)?;
     validate_debit(action, lock)
 }
 
-fn validate_park(park: &Park, action: &Create) -> ExternResult<ValidateCallbackResult> {
+fn validate_park(park: &Park, action: &CreateAction) -> ExternResult<ValidateCallbackResult> {
     ensure!(park.requested_lots > 0, "a park must request at least one lot");
     ensure!(!park.amounts.is_zero(), "a park must commit funds");
     let escrow_record = must_get_valid_record(park.escrow.clone())?;
@@ -215,7 +214,7 @@ fn validate_park(park: &Park, action: &Create) -> ExternResult<ValidateCallbackR
     validate_debit(action, park.amounts)
 }
 
-fn validate_run(run: &SettlementRun, action: &Create) -> ExternResult<ValidateCallbackResult> {
+fn validate_run(run: &SettlementRun, action: &CreateAction) -> ExternResult<ValidateCallbackResult> {
     ensure!(
         run.consumed.len() <= MAX_PARKS_PER_RUN,
         "a run may consume at most {MAX_PARKS_PER_RUN} parks"
@@ -227,13 +226,13 @@ fn validate_run(run: &SettlementRun, action: &Create) -> ExternResult<ValidateCa
         return invalid("run must reference an escrow");
     };
     ensure!(
-        escrow_record.action().author() == &action.author,
+        escrow_record.action().author() == action.author(),
         "only the escrow's maker may execute its settlement runs"
     );
 
     // The run chain for this escrow must be linear on the maker's source chain:
     // `prev_run` must be the latest earlier run, so the lock can't be spent twice.
-    let history = walk_chain(&action.author, &action.prev_action)?;
+    let history = walk_chain(action.author(), &prev_action(action)?)?;
     let mut earlier_runs: Vec<&(ActionHash, u32, SettlementRun)> = history
         .runs
         .iter()
@@ -278,10 +277,10 @@ fn validate_run(run: &SettlementRun, action: &Create) -> ExternResult<ValidateCa
     // Re-execute the settlement logic and require an exact match.
     let input = RunInput {
         terms: escrow.terms,
-        maker: action.author.clone(),
+        maker: action.author().clone(),
         prev_locked,
         parks,
-        now: action.timestamp.as_micros(),
+        now: action.timestamp().as_micros(),
         mode: run.mode,
     };
     let output = match execute_run(&input) {
@@ -294,7 +293,7 @@ fn validate_run(run: &SettlementRun, action: &Create) -> ExternResult<ValidateCa
     valid()
 }
 
-fn validate_collect(collect: &Collect, action: &Create) -> ExternResult<ValidateCallbackResult> {
+fn validate_collect(collect: &Collect, action: &CreateAction) -> ExternResult<ValidateCallbackResult> {
     let run_record = must_get_valid_record(collect.run.clone())?;
     let Some(EntryTypes::SettlementRun(run)) = decode_record(&run_record)? else {
         return invalid("collect must reference a settlement run");
@@ -303,14 +302,14 @@ fn validate_collect(collect: &Collect, action: &Create) -> ExternResult<Validate
         return invalid("allocation index out of range");
     };
     ensure!(
-        allocation.receiver == action.author,
+        &allocation.receiver == action.author(),
         "only the receiver may collect an allocation"
     );
     ensure!(
         allocation.amounts == collect.amounts,
         "collected amounts must equal the allocation"
     );
-    let history = walk_chain(&action.author, &action.prev_action)?;
+    let history = walk_chain(action.author(), &prev_action(action)?)?;
     ensure!(
         !history
             .collects
@@ -321,8 +320,8 @@ fn validate_collect(collect: &Collect, action: &Create) -> ExternResult<Validate
     valid()
 }
 
-fn validate_debit(action: &Create, debit: Amounts) -> ExternResult<ValidateCallbackResult> {
-    let history = walk_chain(&action.author, &action.prev_action)?;
+fn validate_debit(action: &CreateAction, debit: Amounts) -> ExternResult<ValidateCallbackResult> {
+    let history = walk_chain(action.author(), &prev_action(action)?)?;
     let available = history.available().map_err(core_err)?;
     ensure!(
         available.covers(&debit),
@@ -333,17 +332,17 @@ fn validate_debit(action: &Create, debit: Amounts) -> ExternResult<ValidateCallb
 
 fn validate_create_link(
     link_type: LinkTypes,
-    base: AnyLinkableHash,
-    target: AnyLinkableHash,
-    action: &CreateLink,
+    action: &TypedAction<CreateLinkData>,
 ) -> ExternResult<ValidateCallbackResult> {
+    let base = action.data.base_address.clone();
+    let target = action.data.target_address.clone();
     // Every ledger link's target is a ledger entry authored by the link author.
     let Some(target_hash) = target.into_action_hash() else {
         return invalid("link target must be an action hash");
     };
     let target_record = must_get_valid_record(target_hash)?;
     ensure!(
-        target_record.action().author() == &action.author,
+        target_record.action().author() == action.author(),
         "ledger links must be created by the target's author"
     );
     let target_entry = decode_record(&target_record)?;
@@ -365,7 +364,7 @@ fn validate_create_link(
         }
         (LinkTypes::AgentToEscrows, Some(EntryTypes::Escrow(_))) => {
             ensure!(
-                base.into_agent_pub_key() == Some(action.author.clone()),
+                base.into_agent_pub_key() == Some(action.author().clone()),
                 "base must be the maker"
             );
         }

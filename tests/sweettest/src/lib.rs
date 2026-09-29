@@ -45,7 +45,7 @@ impl TestEnv {
         let dna = SweetDnaFile::from_bundle(&dna_path())
             .await
             .expect("DNA bundle not found: run ./build.sh first");
-        let mut conductors = SweetConductorBatch::from_standard_config_rendezvous(n).await;
+        let mut conductors = SweetConductorBatch::from_config_rendezvous(n, SweetConductorConfig::standard()).await;
         let apps = conductors
             .setup_app("dex", &[("dex".to_string(), dna)])
             .await

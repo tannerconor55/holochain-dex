@@ -12,9 +12,9 @@ members = [
 exclude = ["tests/sweettest"]
 
 [workspace.dependencies]
-# Pinned to the Holochain 0.6 line to match the holonix `main-0.6` dev shell.
-hdi = "=0.7.3"
-hdk = "=0.6.3"
+# Pinned to the Holochain 0.7 line to match the holonix `main-0.7` dev shell.
+hdi = "=0.8.0"
+hdk = "=0.7.0"
 serde = { version = "1", features = ["derive"] }
 holochain_serialized_bytes = "=0.0.57"
 

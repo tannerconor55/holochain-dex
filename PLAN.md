@@ -5,7 +5,7 @@ start: `dex_core` (18 unit tests) and the mock `ledger` zomes (4 Sweettest
 tests) pass. Nothing exists yet for order discovery, price levels, signals or UI.
 
 Use the `holochain`, `holochain-dev` and `unyt-smart-agreement` skills. Verify
-every HDK/HDI call against the pinned crate source (`hdk 0.6.3`, `hdi 0.7.3`);
+every HDK/HDI call against the pinned crate source (`hdk 0.7.0`, `hdi 0.8.0`; upgraded from 0.6.3 before Phase 3);
 items marked **(verify)** below are things I have not checked.
 
 ## Decisions made (change them only deliberately)
@@ -19,7 +19,7 @@ items marked **(verify)** below are things I have not checked.
 | Zero-arc / phones? | **Assume no** (desktop, full-arc). Reads use `GetStrategy::Network`. | Confirm with the user; if yes, add a `local` flag to every read. |
 | Relaxed / async commits? | **Assume no** (synchronous). Signals may be sent inline from externs. | Same. If ever yes, move signals to `post_commit`. |
 | Who settles fills? | The maker's own client, automatically while it is online. | Protocol design: `AuthorizedExecutor` = maker. |
-| UI stack | Svelte 5 + Vite + TypeScript + `@holochain/client`. | Matches what the scaffolder produces. Pick the client release that targets Holochain 0.6 **(verify on npm)**. |
+| UI stack | Svelte 5 + Vite + TypeScript + `@holochain/client`. | Matches what the scaffolder produces. Use `@holochain/client` 0.21 (targets Holochain 0.7); keep a single copy in the tree. |
 | Multi-agent local dev | Try `hc-spin` in the Holonix shell **(verify it exists)**; otherwise two `hc sandbox` instances on different ports and a `?app_port=` URL param. | Every demo needs two agents. |
 
 ## Phase 0 — shared API crate (refactor, no behaviour change)
@@ -140,7 +140,7 @@ Design notes:
 ## Phase 4 — signals and maker auto-run
 
 - `init`: grant an unrestricted cap for `recv_remote_signal` only **(verify the
-  HDK 0.6.3 init cap-grant pattern)**.
+  HDK 0.7.0 init cap-grant pattern)**.
 - `take` sends `Signal::ParkPlaced { escrow, park }` to the maker with
   `send_remote_signal`. `run_escrow` results send `Signal::RunSettled { run }`
   to every allocation receiver so they can collect.
@@ -183,8 +183,8 @@ Location: `ui/` (own `package.json`, not part of the Cargo workspace).
 
 **Setup**
 
-- Svelte 5 + Vite + TypeScript. `@holochain/client` (release for Holochain 0.6,
-  **verify**). Node 22 is already in the Nix shell.
+- Svelte 5 + Vite + TypeScript. `@holochain/client` 0.21 (Holochain 0.7; keep one copy via `overrides`).
+  Node 22 is already in the Nix shell.
 - `AppWebsocket.connect({ url, token })` for the app port; get a token from the
   admin websocket with `issueAppAuthenticationToken`, and authorize the signing
   credentials **(verify current `@holochain/client` connect flow)**. Read the port

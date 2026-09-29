@@ -57,48 +57,30 @@ macro_rules! ensure {
 #[hdk_extern]
 pub fn validate(op: Op) -> ExternResult<ValidateCallbackResult> {
     match op.flattened::<(), LinkTypes>()? {
-        FlatOp::StoreRecord(OpRecord::CreateLink {
-            base_address,
-            target_address,
-            tag,
-            link_type,
-            action,
-        })
-        | FlatOp::RegisterCreateLink {
-            base_address,
-            target_address,
-            tag,
-            link_type,
-            action,
-        } => match link_type {
-            LinkTypes::MarketToOrders => {
-                validate_listing(&base_address, target_address, &tag, &action)
-            }
+        FlatOp::CreateRecord(OpRecord::CreateLink { link_type, action })
+        | FlatOp::Link(OpLink::CreateLink { link_type, action }) => match link_type {
+            LinkTypes::MarketToOrders => validate_listing(&action),
         },
-        FlatOp::StoreRecord(OpRecord::DeleteLink { .. }) | FlatOp::RegisterDeleteLink { .. } => {
+        FlatOp::CreateRecord(OpRecord::DeleteLink { .. }) | FlatOp::Link(OpLink::DeleteLink { .. }) => {
             invalid("order book listings are permanent")
         }
         _ => valid(),
     }
 }
 
-fn validate_listing(
-    base: &AnyLinkableHash,
-    target: AnyLinkableHash,
-    tag: &LinkTag,
-    action: &CreateLink,
-) -> ExternResult<ValidateCallbackResult> {
+fn validate_listing(action: &TypedAction<CreateLinkData>) -> ExternResult<ValidateCallbackResult> {
+    let link = &action.data;
     ensure!(
-        base == &AnyLinkableHash::from(market_anchor()?),
+        link.base_address == AnyLinkableHash::from(market_anchor()?),
         "listings must hang off the {MARKET} market anchor"
     );
-    let Some(escrow_hash) = target.into_action_hash() else {
+    let Some(escrow_hash) = link.target_address.clone().into_action_hash() else {
         return invalid("a listing must target an escrow action");
     };
     let record = must_get_valid_record(escrow_hash)?;
     ensure!(is_ledger_escrow(record.action())?, "a listing must target a ledger escrow");
     ensure!(
-        record.action().author() == &action.author,
+        record.action().author() == action.author(),
         "only the escrow's maker may list it"
     );
     // A valid Create of a public entry always carries its entry.
@@ -108,7 +90,7 @@ fn validate_listing(
         .ok_or_else(|| wasm_error!(WasmErrorInner::Guest("escrow record has no entry".into())))?;
     let escrow = Escrow::try_from(entry)?;
     ensure!(
-        tag.0 == encode_tag(&escrow.terms),
+        link.tag.0 == encode_tag(&escrow.terms),
         "listing tag does not match the escrow's terms"
     );
     valid()
@@ -116,7 +98,7 @@ fn validate_listing(
 
 /// A `Create` of `ledger_integrity`'s `Escrow` entry type.
 fn is_ledger_escrow(action: &Action) -> ExternResult<bool> {
-    let Action::Create(create) = action else {
+    let ActionData::Create(create) = &action.data else {
         return Ok(false);
     };
     let EntryType::App(def) = &create.entry_type else {

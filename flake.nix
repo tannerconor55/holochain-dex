@@ -1,8 +1,8 @@
 {
-  description = "DEX MVP — Holochain 0.6 dev shell";
+  description = "DEX MVP — Holochain 0.7 dev shell";
 
   inputs = {
-    holonix.url = "github:holochain/holonix?ref=main-0.6";
+    holonix.url = "github:holochain/holonix?ref=main-0.7";
     nixpkgs.follows = "holonix/nixpkgs";
     flake-parts.follows = "holonix/flake-parts";
   };

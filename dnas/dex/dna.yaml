@@ -1,4 +1,4 @@
-# DNA manifest (Holochain 0.6, manifest_version "0").
+# DNA manifest (Holochain 0.7, manifest_version "0").
 # Changing any integrity zome, or this file's integrity section, changes the DNA hash.
 manifest_version: "0"
 name: dex

@@ -11,11 +11,12 @@ Spec documents: *DEX MVP Protocol v0.1* and *Smart Agreement Plan v0.1*.
 
 | Piece | State |
 |---|---|
-| `dex_core` settlement logic | Done. 18 unit tests pass (`cargo test -p dex_core`). |
-| `ledger_integrity` (mock Unyt: entries + validation) | Done. Type-checks against HDI 0.7.3. Not yet run in a conductor. |
-| `ledger` coordinator (settlement interface) | Done. Type-checks against HDK 0.6.3. Not yet run in a conductor. |
-| Sweettest harness (§30 demo, double-spend, balance, maker-only) | Type-checks against holochain 0.6.3. Not yet run: needs the wasm build (Nix shell). |
-| `dex` zomes: order discovery links, price-level order book | Next. |
+| `dex_core` settlement logic, order book views, listing tags | Done. 35 unit tests pass (`cargo test -p dex_core`). |
+| `ledger_integrity` (mock Unyt: entries + validation) | Done. Runs in a holochain 0.7.0 conductor. |
+| `ledger` coordinator (settlement interface) | Done. Runs in a holochain 0.7.0 conductor. |
+| Sweettest harness (§30 demo, double-spend, balance, maker-only) | 4 tests pass against holochain 0.7.0. |
+| `dex_integrity`: order book listing links and validation | Done. Not yet exercised: needs the `dex` coordinator. |
+| `dex` coordinator: order book reads, take planning, calls into `ledger` | Next (PLAN.md Phase 3). |
 | Signals / notifications, maker auto-run loop, UI | Later. |
 | Rhai Smart Agreement template for real Unyt | Later; port of `dex_core::execute_run`. |
 
@@ -29,26 +30,29 @@ dnas/dex/zomes/integrity/ledger/    mock Unyt ledger: entry types, validation
 dnas/dex/zomes/coordinator/ledger/  mock Unyt ledger: zome functions
 workdir/happ.yaml                   hApp manifest (role "dex")
 tests/sweettest/                    multi-agent conductor tests (own workspace)
-flake.nix                           holonix main-0.6 dev shell
+flake.nix                           holonix main-0.7 dev shell
 build.sh                            wasm build + dna/happ pack
 ```
 
 ## Build and test
 
 ```bash
-nix develop                       # holonix 0.6 shell: rust, wasm target, hc, holochain
+nix develop                       # holonix 0.7 shell: rust, wasm target, hc, holochain
 cargo test -p dex_core            # fast: settlement logic
 ./build.sh                        # zomes -> wasm -> dex.dna -> dex.happ
 cargo test --manifest-path tests/sweettest/Cargo.toml   # conductor tests
 ```
 
-`tests/sweettest/Cargo.lock` is seeded from Holochain's own 0.6.3 lockfile.
-Keep it: without it Cargo resolves `ed25519 ^3.0.0-rc.0` to the final 3.0.0,
-which breaks `ed25519-dalek 3.0.0-pre.1` inside the conductor's iroh transport.
+Keep `tests/sweettest/Cargo.lock`: it pins a resolution of the conductor's
+dependency graph known to build and pass. On 0.6.3 a fresh resolve picked
+`ed25519` 3.0.0 final and broke `ed25519-dalek` inside the iroh transport;
+treat a lockfile regeneration as a change to test.
 
-Versions: `hdk = "=0.6.3"`, `hdi = "=0.7.3"`, `holochain = "=0.6.3"`
-(latest patches of the 0.6 line). HDK 0.7.0 / HDI 0.8.0 is out; upgrading is a
-deliberate later step, not a drive-by, and depends on what Unyt runs.
+Versions: `hdk = "=0.7.0"`, `hdi = "=0.8.0"`, `holochain = "=0.7.0"`
+(holonix `main-0.7`). Upgraded from 0.6.3 before the order book zomes were
+built on top. 0.6 and 0.7 conductors form separate networks with no data
+migration. When the mock ledger is replaced, the Holochain version must match
+what Unyt runs.
 
 ## How settlement works
 
