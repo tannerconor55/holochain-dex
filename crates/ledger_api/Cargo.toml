@@ -10,4 +10,5 @@ description = "Input and output types of the ledger zome's settlement interface"
 [dependencies]
 hdi = { workspace = true }
 serde = { workspace = true }
+holochain_serialized_bytes = { workspace = true }
 dex_core = { workspace = true }

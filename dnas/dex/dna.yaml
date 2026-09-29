@@ -9,6 +9,10 @@ integrity:
     # Mock Unyt ledger. Replaced by Unyt itself once API access exists.
     - name: ledger_integrity
       path: ../../target/wasm32-unknown-unknown/release/ledger_integrity.wasm
+    # Order book listings: links to ledger escrows, validated against
+    # ledger_integrity's Escrow entry (found by zome name, not position).
+    - name: dex_integrity
+      path: ../../target/wasm32-unknown-unknown/release/dex_integrity.wasm
 coordinator:
   zomes:
     - name: ledger

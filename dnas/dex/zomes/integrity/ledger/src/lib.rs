@@ -53,13 +53,8 @@ pub struct Mint {
     pub amounts: Amounts,
 }
 
-/// An order's escrow. Creating it locks `terms.initial_lock()` from the maker.
-/// The action hash of this entry is the order's identity.
-#[hdk_entry_helper]
-#[derive(Clone, PartialEq)]
-pub struct Escrow {
-    pub terms: OrderTerms,
-}
+/// Defined in `ledger_api` so the dex integrity zome can decode it too.
+pub use ledger_api::Escrow;
 
 /// A taker's parked funds and request against one escrow.
 #[hdk_entry_helper]
@@ -107,6 +102,9 @@ pub enum EntryTypes {
     #[entry_type(cache_at_agent_activity = true)]
     Collect(Collect),
 }
+
+// Other integrity zomes identify escrows by this index (see `ledger_api`).
+const _: () = assert!(UnitEntryTypes::Escrow as u8 == ledger_api::ESCROW_ENTRY_INDEX);
 
 #[hdk_link_types]
 pub enum LinkTypes {

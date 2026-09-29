@@ -4,7 +4,7 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 cargo build --release --target wasm32-unknown-unknown \
-  -p ledger_integrity -p ledger
+  -p ledger_integrity -p ledger -p dex_integrity
 hc dna pack dnas/dex -o dnas/dex/workdir/dex.dna
 hc app pack workdir -o workdir/dex.happ
 echo "Built workdir/dex.happ"

@@ -203,6 +203,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "dex_integrity"
+version = "0.1.0"
+dependencies = [
+ "dex_core",
+ "hdi",
+ "holochain_serialized_bytes",
+ "ledger_api",
+ "serde",
+]
+
+[[package]]
 name = "digest"
 version = "0.10.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -641,6 +652,7 @@ version = "0.1.0"
 dependencies = [
  "dex_core",
  "hdi",
+ "holochain_serialized_bytes",
  "serde",
 ]
 
@@ -651,6 +663,7 @@ dependencies = [
  "dex_core",
  "hdi",
  "holochain_serialized_bytes",
+ "ledger_api",
  "serde",
 ]
 

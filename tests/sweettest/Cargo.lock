@@ -4290,6 +4290,7 @@ version = "0.1.0"
 dependencies = [
  "dex_core",
  "hdi",
+ "holochain_serialized_bytes",
  "serde",
 ]
 

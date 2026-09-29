@@ -9,6 +9,30 @@ use hdi::prelude::{ActionHash, AgentPubKey, Timestamp};
 use serde::{Deserialize, Serialize};
 
 pub use dex_core::{Amounts, OrderTerms, RunMode, Side};
+pub use entries::{Escrow, ESCROW_ENTRY_INDEX, LEDGER_INTEGRITY_ZOME};
+
+/// Ledger entries that other integrity zomes must decode. Defined here, not in
+/// `ledger_integrity`, because depending on that crate would link its
+/// `validate` and `entry_defs` exports into the dependent zome's wasm.
+mod entries {
+    use hdi::prelude::*;
+
+    /// The ledger's integrity zome name in `dna.yaml`.
+    pub const LEDGER_INTEGRITY_ZOME: &str = "ledger_integrity";
+
+    /// `Escrow`'s position in `ledger_integrity::EntryTypes`. That crate
+    /// asserts this at compile time, so reordering its variants cannot
+    /// silently break zomes that check it.
+    pub const ESCROW_ENTRY_INDEX: u8 = 1;
+
+    /// An order's escrow. Creating it locks `terms.initial_lock()` from the maker.
+    /// The action hash of this entry is the order's identity.
+    #[hdk_entry_helper]
+    #[derive(Clone, PartialEq)]
+    pub struct Escrow {
+        pub terms: dex_core::OrderTerms,
+    }
+}
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct ParkRequest {

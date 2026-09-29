@@ -1,12 +1,12 @@
 [package]
-name = "ledger_integrity"
+name = "dex_integrity"
 version = "0.1.0"
 edition = "2021"
-description = "Mock Unyt ledger: entry types and validation (DNA-hash impacting)"
+description = "DEX order book: listing link types and validation (DNA-hash impacting)"
 
 [lib]
 crate-type = ["cdylib", "rlib"]
-name = "ledger_integrity"
+name = "dex_integrity"
 
 [dependencies]
 hdi = { workspace = true }
