@@ -501,3 +501,177 @@ async fn take_across_two_orders_is_settled_by_each_maker() {
         .collect();
     assert_eq!(fills, vec![(carol_order, Some(20)), (alice_order, Some(40))], "newest first");
 }
+
+// ---------------------------------------------------------------------------
+// Lifecycle and ledger edge cases
+// ---------------------------------------------------------------------------
+
+fn park_request(escrow: &ActionHash, b: u64, lots: u64) -> ParkRequest {
+    ParkRequest {
+        escrow: escrow.clone(),
+        amounts: Amounts::new(0, b),
+        requested_lots: lots,
+    }
+}
+
+async fn collect_all(env: &TestEnv) {
+    for agent in 0..env.agents.len() {
+        env.collect(agent).await;
+    }
+    env.sync().await;
+}
+
+/// Orders leave the book when fully filled and when they expire. Also: a fill
+/// with nothing pending is a no-op, and a park against an expired order is
+/// refunded by the maker's release.
+#[tokio::test(flavor = "multi_thread")]
+async fn orders_leave_the_book_when_filled_or_expired() {
+    let env = TestEnv::new(2).await;
+    let _: ActionHash = env.call(ALICE, "mint", Amounts::new(2_000, 0)).await;
+    let _: ActionHash = env.call(BOB, "mint", Amounts::new(0, 10_000)).await;
+    let minted = Amounts::new(2_000, 10_000);
+
+    let lasting: ActionHash = env.dex(ALICE, "place_order", sell(10, 120)).await;
+    let expires_at = Timestamp::now().as_micros() + 30_000_000;
+    let short: ActionHash = env
+        .dex(ALICE, "place_order", OrderTerms { expires_at, ..sell(10, 130) })
+        .await;
+    env.sync().await;
+    assert_eq!(env.book(BOB).await.asks, vec![level(120, 10, 1), level(130, 10, 1)]);
+
+    // Nothing pending: no run is written.
+    let none: Vec<RunReport> = env.dex(ALICE, "run_my_orders", ()).await;
+    assert!(none.is_empty());
+    let fill: Option<RunReport> = env
+        .call(ALICE, "run_escrow", RunEscrowInput { escrow: lasting.clone(), mode: RunMode::Fill })
+        .await;
+    assert!(fill.is_none());
+
+    // Full fill.
+    let _: TakeResult = env
+        .dex(BOB, "take", TakeRequest { take: Side::Buy, lots: 10, limit_price: Some(120) })
+        .await;
+    env.sync().await;
+    let reports: Vec<RunReport> = env.dex(ALICE, "run_my_orders", ()).await;
+    assert_eq!(reports.iter().map(|r| r.filled_lots).collect::<Vec<_>>(), vec![10]);
+    env.sync().await;
+    assert_eq!(env.book(BOB).await.asks, vec![level(130, 10, 1)], "a filled order leaves the book");
+
+    // Expiry.
+    while Timestamp::now().as_micros() <= expires_at + 1_000_000 {
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    }
+    assert!(env.book(BOB).await.asks.is_empty(), "an expired order leaves the book");
+
+    // A park against the expired order (a stale client) is accepted and refunded.
+    let _: ActionHash = env.call(BOB, "park", park_request(&short, 1_300, 10)).await;
+    env.sync().await;
+    let reports: Vec<RunReport> = env.dex(ALICE, "run_my_orders", ()).await;
+    assert_eq!(reports.len(), 1);
+    assert_eq!((reports[0].mode, reports[0].filled_lots), (RunMode::Release, 0));
+    env.sync().await;
+    collect_all(&env).await;
+
+    assert_eq!(env.balance(BOB).await.available, Amounts::new(1_000, 8_800), "the late park is refunded");
+    assert_eq!(env.balance(ALICE).await.available, Amounts::new(1_000, 1_200));
+    let statuses: Vec<OrderStatus> = env
+        .dex::<_, Vec<MyOrder>>(ALICE, "my_orders", ())
+        .await
+        .into_iter()
+        .map(|o| o.status)
+        .collect();
+    assert_eq!(statuses, vec![OrderStatus::Expired, OrderStatus::Filled], "newest first");
+    let parks: Vec<Option<u64>> = env
+        .dex::<_, Vec<ParkStatus>>(BOB, "my_parks", ())
+        .await
+        .iter()
+        .map(|p| p.settlement.as_ref().map(|s| s.filled_lots))
+        .collect();
+    assert_eq!(parks, vec![Some(0), Some(10)]);
+    assert_eq!(env.total_supply().await, minted);
+}
+
+/// Three makers at one price: the level lists them oldest first, and a take
+/// consumes them in that order, skipping the taker's own order.
+#[tokio::test(flavor = "multi_thread")]
+async fn orders_at_one_price_fill_in_time_priority() {
+    let env = TestEnv::new(3).await;
+    for maker in [ALICE, BOB, CAROL] {
+        let _: ActionHash = env.call(maker, "mint", Amounts::new(1_000, 0)).await;
+    }
+    let _: ActionHash = env.call(CAROL, "mint", Amounts::new(0, 5_000)).await;
+    let minted = Amounts::new(3_000, 5_000);
+
+    let mut ids = Vec::new();
+    for maker in [ALICE, BOB, CAROL] {
+        ids.push(env.dex::<_, ActionHash>(maker, "place_order", sell(10, 120)).await);
+        env.sync().await;
+    }
+    assert_eq!(env.book(ALICE).await.asks, vec![level(120, 30, 3)]);
+    let at_level: Vec<ActionHash> = env
+        .dex::<_, Vec<dex_api::Order>>(
+            ALICE,
+            "get_level_orders",
+            dex_api::LevelQuery { side: Side::Sell, price_per_lot: 120 },
+        )
+        .await
+        .into_iter()
+        .map(|o| o.id)
+        .collect();
+    assert_eq!(at_level, ids, "oldest first");
+
+    let taken: TakeResult = env
+        .dex(CAROL, "take", TakeRequest { take: Side::Buy, lots: 15, limit_price: None })
+        .await;
+    let planned: Vec<(ActionHash, u64)> = taken.parks.iter().map(|p| (p.escrow.clone(), p.lots)).collect();
+    assert_eq!(planned, vec![(ids[0].clone(), 10), (ids[1].clone(), 5)], "Carol skips her own order");
+    env.sync().await;
+    for maker in [ALICE, BOB] {
+        let _: Vec<RunReport> = env.dex(maker, "run_my_orders", ()).await;
+    }
+    env.sync().await;
+    collect_all(&env).await;
+
+    assert_eq!(env.balance(CAROL).await.available, Amounts::new(1_500, 5_000 - 1_800));
+    assert_eq!(env.book(ALICE).await.asks, vec![level(120, 15, 2)]);
+    assert_eq!(env.total_supply().await, minted);
+}
+
+/// 21 parks exceed one run's cap of 20. Both `run_my_orders` (fill) and
+/// `cancel_order` (release) settle them with two runs in one call.
+#[tokio::test(flavor = "multi_thread")]
+async fn more_parks_than_one_run_takes_settle_in_one_call() {
+    let env = TestEnv::new(2).await;
+    let _: ActionHash = env.call(ALICE, "mint", Amounts::new(20_000, 0)).await;
+    let _: ActionHash = env.call(BOB, "mint", Amounts::new(0, 60_000)).await;
+    let minted = Amounts::new(20_000, 60_000);
+    let to_fill: ActionHash = env.dex(ALICE, "place_order", sell(100, 120)).await;
+    let to_cancel: ActionHash = env.dex(ALICE, "place_order", sell(100, 125)).await;
+    env.sync().await;
+
+    for _ in 0..21 {
+        let _: ActionHash = env.call(BOB, "park", park_request(&to_fill, 120, 1)).await;
+        let _: ActionHash = env.call(BOB, "park", park_request(&to_cancel, 125, 1)).await;
+    }
+    env.sync().await;
+
+    let cancelled: Vec<RunReport> = env.dex(ALICE, "cancel_order", to_cancel).await;
+    let pending: Vec<usize> = cancelled.iter().map(|r| r.still_pending).collect();
+    assert_eq!(pending, vec![1, 0], "20 refunds, then the 21st");
+    assert!(cancelled.iter().all(|r| r.filled_lots == 0));
+
+    let filled: Vec<RunReport> = env.dex(ALICE, "run_my_orders", ()).await;
+    let lots: Vec<u64> = filled.iter().map(|r| r.filled_lots).collect();
+    assert_eq!(lots, vec![20, 1], "only the open order runs; the cancelled one is settled");
+    env.sync().await;
+    collect_all(&env).await;
+
+    assert_eq!(env.balance(BOB).await.available, Amounts::new(2_100, 60_000 - 21 * 120));
+    let alice = env.balance(ALICE).await;
+    assert_eq!(alice.available, Amounts::new(10_000, 21 * 120));
+    assert_eq!(alice.locked_in_escrows, Amounts::new(7_900, 0));
+    let parks: Vec<ParkStatus> = env.dex(BOB, "my_parks", ()).await;
+    assert_eq!(parks.len(), 42);
+    assert!(parks.iter().all(|p| p.settlement.is_some()), "no park left waiting");
+    assert_eq!(env.total_supply().await, minted);
+}
