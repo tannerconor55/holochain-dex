@@ -284,6 +284,15 @@ with what the port answered:
     as `lockbox` does.
 12. *New:* can the maker park the opening spend targeted at themselves as the
     executor, and does `GetPreviousExecution` see nothing on that first run?
+13. *New:* is there, or could there be, a helper that returns a parked link's
+    timestamp? `acceding_sort_allocation` sorts by it but does not return it,
+    so the template relies on a taker-declared deadline in the spend payload.
+    The template can refuse expired parks; a taker's reclaim on Unyt depends
+    on question 1.
+14. *New:* how are credit limits set and enforced for a hub currency (HF),
+    and who may change them?
+15. *New:* can a `ParkedSpendCredit` (spending on credit) fund a DEX order
+    escrow, or only `ParkedSpendBalance`?
 
 ## DNA-hash note
 

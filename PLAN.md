@@ -301,6 +301,16 @@ Open question: the limit formulas round buy up and sell down, which loosens
 the limit by up to one minor unit per lot. Flip to buy floor / sell ceil if
 the limit must never exceed the stated slippage.
 
+## Future milestones (recorded, not scheduled)
+
+- **"Swap X for Y via HF" routing** (after market orders): two market orders,
+  X->HF then HF->Y, each with its own slippage limit. Non-atomic: leg 2 can
+  fail or fill partially after leg 1 settled, so the result must say clearly
+  what was converted, what is left in HF and what to do next.
+- **HF mutual credit, modelled on Unyt's credit mechanism:** negative HF
+  balances within credit limits. Not implemented now; balances stay
+  non-negative. Depends on the Unyt credit questions in README.
+
 ## Unyt template port — done
 
 `unyt/dex_order_escrow` (Rhai) does what one `SettlementRun` does;
@@ -329,5 +339,11 @@ Sweettests. Design: `docs/design/taker-protection.md`.
 
 Decision (2026-09-30, asked before design): **multi-market support (generic
 pair, per-market lot and tick size) is folded into this same integrity
-change**, so the network resets once. Its design is not part of the
-taker-protection document and is still to be done.
+change**, so the network resets once. Designed in section 11 of the design
+doc and approved, with a **hub asset**: units and markets live in DNA
+properties, every market is quoted in the hub unit **HF** (markets are
+X/HF only), and the default demo market is **A/HF** (UNIT-B renamed HF,
+same numbers).
+
+Order of work: (a) `Amounts` as a normalised unit map, alone and
+behaviour-preserving (done, `94a95b4`); then Phase 2 steps 1-8.
