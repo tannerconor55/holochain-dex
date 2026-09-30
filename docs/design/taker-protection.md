@@ -1,6 +1,13 @@
 # Taker protection and validation performance
 
-Milestone 2 design, for approval. One integrity (DNA-hash) change covers:
+**Status: approved and implemented** (milestone 2, commits `94a95b4` to
+`9219d93` on `order-book`; PLAN.md lists them). Where the implementation
+departed from this text: the coordinator checkpoints every 32 ledger entries
+**or 128 actions**; the maker's deadline margin is `min(60 s, window / 5)`;
+Sweettests were sped up by optimising dependencies rather than sharing
+conductors (section 10, D).
+
+Milestone 2 design. One integrity (DNA-hash) change covers:
 
 - **A.** Park timeout: a taker can reclaim a park the maker never settled.
 - **B.** Balance checkpoints: debit validation stops walking the whole chain.
@@ -8,9 +15,9 @@ Milestone 2 design, for approval. One integrity (DNA-hash) change covers:
 Two client-side items with no integrity change are sketched at the end:
 **C.** a maker presence check before parking, and **D.** faster Sweettests.
 
-Multi-market support (generic pair, per-market lot and tick size) is being
-folded into the same integrity change (PLAN.md, decided 2026-09-30). It is
-not designed here.
+Multi-market support (generic pair, per-market lot and tick size) is folded
+into the same integrity change (PLAN.md, decided 2026-09-30); section 11
+designs it.
 
 Version note: the prompt names hdk 0.6.3 / hdi 0.7.3 / holochain 0.6.3. The
 repo has pinned hdk 0.7.0 / hdi 0.8.0 / holochain 0.7.0 since the upgrade.

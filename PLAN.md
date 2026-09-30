@@ -328,10 +328,10 @@ exactly; roles `maker_spender` and `taker_spender`.
    scenario, formatter and parsers, 13,129 operations at the 20-park cap.
 3. `Document Unyt template port`
 
-Open: the [DNA] items and questions 1–12 in README "Swapping in real Unyt";
+Open: the [DNA] items and questions 1–15 in README "Swapping in real Unyt";
 replacing the `ledger` zomes with Unyt itself.
 
-## Milestone 2 — taker protection and validation performance (in progress)
+## Milestone 2 — taker protection and validation performance — done
 
 One integrity (DNA-hash) change: (A) park timeout / reclaim, (B) balance
 checkpoints; plus client-side (C) maker presence check and (D) faster
@@ -345,5 +345,34 @@ properties, every market is quoted in the hub unit **HF** (markets are
 X/HF only), and the default demo market is **A/HF** (UNIT-B renamed HF,
 same numbers).
 
-Order of work: (a) `Amounts` as a normalised unit map, alone and
-behaviour-preserving (done, `94a95b4`); then Phase 2 steps 1-8.
+Commits, on `order-book`:
+
+| Step | Commit | |
+|---|---|---|
+| a | `94a95b4` | `Amounts` as a normalised unit map (DNA-hash impacting) |
+| 1 | `5e7c786` | `dex_core` deadline, checkpoint and market logic (DNA-hash impacting) |
+| 2 | `e9393e9` | reclaim, checkpoints and markets in `ledger_integrity` (DNA-hash impacting) |
+| 3 | `19d2c2c` | `reclaim_park`, auto-checkpoints (32 entries or 128 actions), park deadline / reclaimable |
+| 4 | `c4224d3` | maker presence check (advisory ping), reclaim UI, per-market externs and market selector |
+| 5 | `e8d44fd` | crafted-chain tests T1–T13 against the real `validate`; reclaim, checkpoint and market Sweettests; supply checked after every test |
+| 6 | `55008b6` | Sweettest suite 2048 s -> 235 s (optimised dependencies; the cost was wasm compilation, not setup) |
+| 7 | `9219d93` | Rhai template: taker-declared `park_deadline`, expired parks to `rejected_links`; parity extended |
+| 8 | this commit | docs |
+
+Deviations from the plan, all reported when made:
+- Step 6 did not share conductors between tests: measurement showed wasm
+  compilation (~30 s per agent in an unoptimised build), not setup, was the
+  cost; sharing would now save ~3 s per test and lose isolation.
+- The maker's deadline margin is `min(60 s, window / 5)`, so a short test
+  window (25 s) still settles; production is unchanged at 60 s.
+- Test-only ledger externs `park_raw`, `reclaim_raw`, `checkpoint_raw` and
+  `get_my_checkpoints` (step 5), as the design doc foresaw for the forged
+  checkpoint test.
+
+Open:
+- The fork case (T12) is shown, not defended: Holochain warrants it.
+- A maker who never writes again blocks reclaim (README "Known limitations").
+- Presence answers for the conductor, not the app that runs the orders.
+- The collected set in checkpoints grows with history (design doc section 7).
+- On Unyt: reclaim of a parked spend (README Unyt question 1) and a helper
+  returning a parked link's timestamp (question 13).

@@ -1,7 +1,8 @@
 # DEX MVP — Holochain + (mock) Unyt
 
-A peer-to-peer limit-order exchange for two test assets, **UNIT-A / UNIT-B**,
-built on Holochain. Settlement follows the design planned for a Unyt Smart
+A peer-to-peer limit-order exchange for test assets, built on Holochain.
+Markets are declared in the DNA properties and every market is quoted in the
+hub unit **HF**; the demo DNA declares one market, **A/HF**. Settlement follows the design planned for a Unyt Smart
 Agreement, but runs against a **mock Unyt ledger** inside this DNA until Unyt
 API access is available.
 
@@ -11,15 +12,16 @@ Spec documents: *DEX MVP Protocol v0.1* and *Smart Agreement Plan v0.1*.
 
 | Piece | State |
 |---|---|
-| `dex_core`: settlement logic, order book views, listing tags, order status, market planning | Done. 48 unit tests. |
-| `ledger_integrity` / `ledger` (mock Unyt ledger) | Done. Runs on holochain 0.7.0. |
+| `dex_core`: settlement logic, order book views, listing tags, order status, market planning, park deadlines, checkpoint arithmetic, markets and DNA properties | Done. 76 unit tests, including a property test of the run-or-reclaim rule over 20,000 generated maker chains. |
+| `ledger_integrity` / `ledger` (mock Unyt ledger) | Done. Runs on holochain 0.7.0. Park deadlines and anchored reclaim, balance checkpoints, units and markets from DNA properties. 17 crafted-chain tests run the real `validate` against every attack trace in `docs/design/taker-protection.md`. |
 | `dex_integrity`: listing links, validated against the escrow | Done. Wrong tag and wrong author rejected in a conductor. |
-| `dex` coordinator: listing, book, take planning, maker settlement | Done. |
+| `dex` coordinator: listing, book, take planning, maker settlement, per-market reads, maker presence ping | Done. |
 | Signals (`park_placed`, `run_settled`) and maker auto-run | Done; the UI drives the auto-run. |
 | Market orders (taker-only, IOC, slippage-limited; by lots or budget; one retry) | Done: `dex_core`, `dex` externs, UI. See [Market orders](#market-orders). |
-| Sweettest suite | 16 tests pass (~20 min; each test starts its own conductors). |
-| UI (`ui/`): wallet, book, limit and market ticket, take flow, my orders, activity | Done. 16 Vitest tests; Playwright runs the demo and a market order against two real conductors. |
-| Unyt Smart Agreement template (`unyt/dex_order_escrow`, Rhai) | Done: 4,000 generated runs identical to `dex_core::execute_run` under the published `rave_engine` 0.12.0. See [Unyt port](#unyt-port). |
+| Sweettest suite | 22 tests pass in ~4 min (each test starts its own conductors; the first build takes ~12 min, see [Build and test](#build-and-test)). Every test ends by checking total supply equals everything minted. |
+| UI (`ui/`): wallet, book, limit and market ticket, take flow, my orders, activity, maker presence warning, reclaim countdown and button, market selector | Done. 19 Vitest tests; Playwright runs the demo and a market order against two real conductors. |
+| Unyt Smart Agreement template (`unyt/dex_order_escrow`, Rhai) | Done: 4,000 generated runs identical to `dex_core::execute_run` under the published `rave_engine` 0.12.0, park deadlines included. See [Unyt port](#unyt-port). |
+| Milestone 2: taker protection, checkpoints, multi-market | Done. Design and proofs: `docs/design/taker-protection.md`. |
 
 ## Layout
 
@@ -29,6 +31,7 @@ crates/dex_core/                    pure settlement logic, no Holochain deps
 dnas/dex/dna.yaml                   DNA manifest
 crates/ledger_api/, crates/dex_api/ extern input/output types
 dnas/dex/zomes/integrity/ledger/    mock Unyt ledger: entry types, validation
+  tests/crafted_chains.rs           attack traces against the real validate (native, fake DHT)
 dnas/dex/zomes/coordinator/ledger/  mock Unyt ledger: zome functions
 dnas/dex/zomes/{integrity,coordinator}/dex/  order book: listings, reads, takes
 workdir/happ.yaml                   hApp manifest (role "dex")
@@ -36,6 +39,7 @@ tests/sweettest/                    multi-agent conductor tests (own workspace)
 unyt/dex_order_escrow/              the settlement run as a Unyt Smart Agreement (Rhai)
 tests/rhai_parity/                  template vs dex_core under rave_engine (own workspace)
 ui/                                 Svelte UI
+docs/design/taker-protection.md     reclaim, checkpoints and markets: design and proof plan
 flake.nix                           holonix main-0.7 dev shell
 build.sh                            wasm build + dna/happ pack
 ```
@@ -45,10 +49,16 @@ build.sh                            wasm build + dna/happ pack
 ```bash
 nix develop                       # holonix 0.7 shell: rust, wasm target, hc, holochain
 cargo test -p dex_core            # fast: settlement logic
+cargo test -p ledger_integrity    # fast: attack traces against validate
 ./build.sh                        # zomes -> wasm -> dex.dna -> dex.happ
-cargo test --manifest-path tests/sweettest/Cargo.toml   # conductor tests
-cargo test --manifest-path tests/rhai_parity/Cargo.toml # Rhai template vs dex_core (~75 s)
+cargo test --manifest-path tests/sweettest/Cargo.toml   # conductor tests (~4 min)
+cargo test --manifest-path tests/rhai_parity/Cargo.toml # Rhai template vs dex_core (~80 s)
 ```
+
+The Sweettest crate builds its dependencies with `opt-level = 3`: the
+conductor compiles every zome's wasm with Cranelift on first use, which an
+unoptimised `holochain` makes ~30 s per agent. The first build after a clean
+takes ~12 minutes; later ones only rebuild the test crate.
 
 Keep `tests/sweettest/Cargo.lock`: it is seeded from holochain 0.7.0's own
 published `Cargo.lock`, with this repo's crates added on top, so the
@@ -110,6 +120,9 @@ instance). Its action hash is the order's identity.
    refunds consumed parks and returns the whole lock to the maker.
 4. **Collect.** Each receiver creates a `Collect` for their allocation, which
    credits their balance.
+5. **Reclaim.** A park its maker has not settled by its deadline can be taken
+   back by the taker with a `Reclaim`, once the maker has written any action
+   at or after that deadline (see [Taker protection](#taker-protection)).
 
 Every validator re-executes the run with `dex_core::execute_run` and requires
 an exact match, like peers re-running a Unyt RAVE.
@@ -117,19 +130,74 @@ an exact match, like peers re-running a Unyt RAVE.
 ### Invariants enforced by validation
 
 * **No negative balances**: `Escrow` and `Park` debits are checked against the
-  author's balance, recomputed from their source chain.
+  author's balance: their latest `Checkpoint` plus the ledger entries after
+  it, never the whole chain.
 * **No double-spend of an escrow**: runs are maker-only, and each must name the
   maker's latest run for that escrow as `prev_run`, checked by walking the
-  maker's chain. A park can be consumed by at most one run.
-* **Atomic settlement and conservation**: per asset,
+  maker's chain back to it. A park can be consumed by at most one run.
+* **Run or reclaim, never both**: a run may consume a park only before the
+  park's deadline; a `Reclaim` must cite a maker action at or after the
+  deadline, and the maker's chain from the escrow to that action must hold no
+  run consuming the park. On an unforked chain a park is therefore paid out
+  once; a double spend through a fork gets the maker warranted by Holochain.
+* **Atomic settlement and conservation**: per unit,
   `paid out + locked = parked inputs + previously locked`.
-* **No double collection**: one `Collect` per allocation, by its receiver only.
+* **No double collection**: one `Collect` per allocation, by its receiver
+  only, across checkpoints (a checkpoint carries every allocation collected).
+* **Bounded validation cost**: a checkpoint must equal the previous one plus
+  the entries since; a debit, collect or reclaim citing a checkpoint that is
+  not the latest, or more than 256 actions old, is refused. The coordinator
+  writes one every 32 ledger entries or 128 actions.
+* **Declared units and markets only**: amounts in an undeclared unit, a park
+  in another market than its escrow, and a price off the market's tick are
+  refused.
 
-### Units
+### Units, markets and timing (DNA properties)
 
-Integer minor units only, never floats. Both assets have 2 decimals. One lot is
-1.00 A (`LOT_SIZE_A = 100`). Price is `price_per_lot` in B minor units:
-1.20 B per A is `120`. Quote = `lots × price_per_lot`.
+`dnas/dex/dna.yaml` declares, and `genesis_self_check` and `validate` check
+(missing or malformed properties are refused, never defaulted):
+
+| Property | Demo DNA | Meaning |
+|---|---|---|
+| `units` | `A` and `HF`, 2 decimals each | every amount is in integer minor units of a declared unit |
+| `markets` | `A/HF`, `lot_size` 100, `tick_size` 1 | base/quote (quote is always `HF`); a market's id is `blake2b-256(base, quote)`; duplicates, `base == quote`, a pair and its inverse, and zero lot or tick are refused at genesis |
+| `park_timeout_secs` | 1800 | a park's run window |
+| `settle_grace_secs` | 300 | added after the window (or after the order's expiry, if sooner) |
+
+Price is `price_per_lot` in quote minor units: 1.20 HF per A is `120`, a
+multiple of `tick_size`. One lot is `lot_size` base minor units (100 =
+1.00 A). Quote = `lots × price_per_lot`. Each market has its own book (one
+anchor per market); the UI's market selector appears once a second market
+is declared. Properties are part of the DNA hash: changing any value makes a
+new network.
+
+## Taker protection
+
+A park's **deadline** is `min(parked_at + park_timeout, expires_at) +
+settle_grace`. The maker's coordinator only settles parks with time to
+spare before it (60 s, or a fifth of the window if shorter).
+
+* **Reclaim.** After the deadline the taker's UI counts down to "Reclaim";
+  `reclaim_park` finds the maker's latest action and, if it is stamped at or
+  after the deadline, writes a `Reclaim` citing it. Validation walks the
+  maker's chain from the escrow to that action and refuses the reclaim if any
+  run there consumed the park.
+* **Why an anchor is needed.** Holochain only requires an author's
+  timestamps to be non-decreasing along their own chain; nothing bounds how
+  far back an action may be stamped. Without a later maker action to walk to,
+  validation cannot rule out a run the maker has yet to write, stamped before
+  the deadline.
+* **Maker presence (advisory).** Before a take, the UI pings each maker
+  (`check_makers`, all at once, under a cap grant for `ping` only) and by
+  default refuses to park against one not seen in the last 60 s, with a
+  "Park anyway" override. It proves nothing about later, and validation does
+  not depend on it.
+
+The proof is in three layers (design doc section 9): a `dex_core` property
+test of the rule; crafted-chain tests that feed backdated chains to the real
+`validate` (every trace T1–T13, including the maker backdating a run as far
+as Holochain allows); and Sweettests on real conductors (a maker offline past
+the deadline, early, foreign and repeated reclaims, a settled park).
 
 ## Market orders
 
@@ -154,7 +222,7 @@ validation change.
   minor unit per lot (a buy at best 1.20 with 2% may pay up to 1.23, not 1.224).
 * **Cross-maker priority is chosen by the taker's client**, best price then
   oldest, the same as a limit take. Nothing forces another client to do the same.
-* **Amount:** whole lots, or a budget of the paying asset (B to buy, A to sell)
+* **Amount:** whole lots, or a budget of the paying asset (HF to buy, the base unit to sell)
   spent on whole lots without ever exceeding it. The plan reports per-order
   lots and cost, the average price as an exact rational
   (`total_quote_minor / total_lots`), the worst price and any shortfall.
@@ -169,10 +237,28 @@ Externs: `preview_market_order`, `market_order`, `market_order_by_budget`,
 
 ## Known limitations (MVP, by design)
 
-* **Maker liveness.** Fills only settle when the maker's node runs the escrow.
-  A taker's parked funds wait until the maker's next run (fill, release or
-  refund). The maker's client settles automatically while its app is open;
-  a maker who closes the app leaves takers waiting until they return.
+* **Maker liveness.** A park the maker has not settled within its deadline
+  (30 minutes after parking, or the order's expiry if sooner, plus 5 minutes'
+  grace) can be reclaimed by the taker, and the maker's cooperation is not
+  needed: any action the maker writes on this network after the deadline
+  (settling another order, collecting, trading) is enough to prove the park
+  was never settled. If the maker never writes anything again, the park
+  cannot be reclaimed: validation has no clock, and Holochain lets an author
+  backdate an action to their own last action, so only a later maker action
+  can prove no settlement is still to come. The maker's own escrowed funds
+  stay locked in the same way.
+* **Forks.** A maker who forks their chain can make both a run and a reclaim
+  of one park valid, each on its own branch. Holochain detects the fork and
+  warrants the maker; validation reads one branch and cannot prevent it. The
+  escrow lock has the same exposure.
+* **Presence means the conductor, not the app.** The maker ping is answered
+  by the maker's conductor, but orders settle only while the maker's app is
+  open (the UI drives the auto-run). Under hc-spin or a launcher the two run
+  together; with a separately running conductor the check can pass while
+  nothing settles.
+* **Reclaim becomes available eventually.** After the maker's anchoring
+  action, the taker's node may take a few seconds to see it (the UI polls
+  every 10 s).
 * **Maker-asserted time.** A run's timestamp is the maker's own action
   timestamp, as Unyt's `executed_timestamp` is the executor's. Expiry protects
   the maker, so this is acceptable. If an order expires in the instant between
@@ -184,7 +270,10 @@ Externs: `preview_market_order`, `market_order`, `market_order_by_budget`,
   consumes. The coordinator always takes the oldest, but validation cannot
   force it.
 * **Mint is an open faucet** (capped per call). Test assets only.
-* **Chain walks are O(chain length).** Fine for a demo; the real ledger is Unyt.
+* **The collected set grows.** A checkpoint carries every allocation its
+  author ever collected (about 40 bytes each), so checkpoints grow with an
+  account's history; 100,000 collects is about the 4 MB entry limit. Design
+  doc section 7 records the alternatives.
 * **Reads always use the network.** v1 targets desktop full-arc nodes only; phones
   (zero-arc nodes) would need an explicit local/network choice on every read.
 
@@ -206,22 +295,27 @@ only be checked on a Unyt network, because the validator is not public.
 
 | Check | Result |
 |---|---|
-| Differential: `dex_core`'s own generator (same seed and draws), 2,000 cases, each as an opening run and as a later run | 4,000 runs identical: allocations per receiver, locked, consumed order, per-park fills, deferred parks (186,180 lots filled) |
+| Differential: `dex_core`'s own generator (same seed and draws), 2,000 cases, each as an opening run and as a later run, with park deadlines straddling the run time | 4,000 runs identical: allocations per receiver, locked, consumed order, per-park fills, rejected parks (past their deadline or beyond the cap, in time order); 159,230 lots filled, 9,919 parks past their deadline |
 | From half-sold locks | 500 more runs identical |
 | Every `dex_core` unit-test scenario, both starts where possible | identical, including §30 chained through the engine's own output, the cap and the deferred park's next run, and the same refusals (duplicate park, bad lock, invalid terms) |
 | Conservation per unit and source naming, checked on every Rhai output | hold |
 | Formatter and parsers, run from the shipped script | exact 2 decimals, no `-0`, `i64::MAX`, round trips; RFC3339 with 0/3/6 fractional digits |
-| Mutation check | an expiry off-by-one and a reversed tie-break each fail a scenario |
+| Park deadlines | at the deadline vs 1 µs before, in Fill and Release; no declared deadline; expired parks outside the 20-park cap |
+| Mutation check | an expiry off-by-one, a reversed tie-break, and ignoring park deadlines each fail |
 
 **Operations** (binary search on `max_operations`, default budget 100,000):
 
 | Run | Operations |
 |---|---|
-| no parks | 964 |
-| 1 park | 1,849 |
-| 20 parks (the cap) | 13,129 (13% of the budget; 608 per park) |
-| opening run with 20 parks | 13,215 |
-| 25 parks, 5 deferred | 13,369 |
+| no parks | 976 |
+| 1 park | 1,888 |
+| 20 parks (the cap) | 13,681 (14% of the budget; 635 per park) |
+| opening run with 20 parks | 13,767 |
+| 25 parks, 5 deferred | 14,056 |
+
+The deadline is **taker-declared** in the spend payload (`park_deadline`,
+beside `requested_lots`), since no helper returns a parked link's timestamp
+(question 13). A wrong one only affects the taker's own spend.
 
 ### What is proven, and what only Unyt can confirm
 
@@ -238,8 +332,8 @@ Proven by running the published engine [engine]:
 
 Only checkable on a Unyt network [DNA]:
 - Conservation per unit, and that a source counts once an allocation names it.
-- That a `ProvidedBy: taker_spender` input named `requested_lots` is filled
-  from each spend's payload (`ParkedLink::get_input_for_key` is published;
+- That `ProvidedBy: taker_spender` inputs named `requested_lots` and
+  `park_deadline` are filled from each spend's payload (`ParkedLink::get_input_for_key` is published;
   its caller is not).
 - Which links a run is handed, in what order, and how many.
 - `AuthorizedExecutor` enforcement, the refusal of a lock under `Any`, and
@@ -249,13 +343,17 @@ Only checkable on a Unyt network [DNA]:
 ## Swapping in real Unyt
 
 The `ledger` coordinator's functions are the whole settlement interface:
-`mint`, `open_escrow`, `park`, `run_escrow`, `collect_all`, plus reads. To move
+`mint`, `open_escrow`, `park`, `run_escrow`, `collect_all`, `reclaim_park`,
+plus reads (and test-only `*_raw` writes). To move
 to Unyt, reimplement that surface against Unyt Smart Agreements built from
 `unyt/dex_order_escrow` and remove the two `ledger` zomes. Questions for Unyt,
 with what the port answered:
 
 1. Can a parked spend be withdrawn before an agreement consumes it? *Open.*
-2. Can one network carry UNIT-A and UNIT-B, and one run move both? *Partly
+   The mock ledger's anchored reclaim is the behaviour takers need; the
+   template refuses to consume a park past its deadline, but cannot give it
+   back.
+2. Can one network carry several units (A, HF, …), and one run move two? *Partly
    answered:* a unit map holds several indexes and one allocation carries both
    [engine]. Open: per-unit conservation [DNA], and that both units allow at
    least 2 decimals (amounts are written as `"123.45"`).
@@ -296,6 +394,8 @@ with what the port answered:
 
 ## DNA-hash note
 
-Anything under `dnas/dex/zomes/integrity/` and `dnas/dex/dna.yaml` is part of
-the DNA hash. Changing them creates a new network. Keep integrity changes in
+Anything under `dnas/dex/zomes/integrity/` and `dnas/dex/dna.yaml`
+(including its `properties`: units, markets, timing) is part of the DNA hash.
+Changing them creates a new network. The crafted-chain tests under
+`integrity/ledger/tests/` are not compiled into the wasm and do not. Keep integrity changes in
 their own commits, separate from coordinator, UI and test changes.
