@@ -146,3 +146,42 @@ pub struct BalanceView {
     pub uncollected: Amounts,
     pub total: Amounts,
 }
+
+// ---------------------------------------------------------------------------
+// Test-only requests
+// ---------------------------------------------------------------------------
+//
+// These let a Sweettest write what the coordinator never would, to prove
+// validation refuses it. None can create an entry validation accepts that
+// the normal externs could not.
+
+/// A park with every field chosen by the caller.
+#[derive(Serialize, Deserialize, Debug)]
+pub struct RawPark {
+    pub escrow: ActionHash,
+    pub market: dex_core::MarketId,
+    pub amounts: Amounts,
+    pub requested_lots: u64,
+    pub checkpoint: Option<ActionHash>,
+}
+
+/// A reclaim citing any anchor, without the coordinator's checks.
+#[derive(Serialize, Deserialize, Debug)]
+pub struct RawReclaim {
+    pub park: ActionHash,
+    pub anchor: ActionHash,
+}
+
+/// A checkpoint with any contents.
+#[derive(Serialize, Deserialize, Debug)]
+pub struct RawCheckpoint {
+    pub prev: Option<ActionHash>,
+    pub state: dex_core::checkpoint::CheckpointState<ActionHash>,
+}
+
+/// One of the caller's checkpoints.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct CheckpointView {
+    pub checkpoint: ActionHash,
+    pub state: dex_core::checkpoint::CheckpointState<ActionHash>,
+}

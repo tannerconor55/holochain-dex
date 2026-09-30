@@ -17,6 +17,7 @@ use ledger_api::{
     Amounts, BalanceView, EscrowState, OrderTerms, ParkRequest, ParkStatus, RunEscrowInput,
     RunMode, RunReport, Side,
 };
+use dex_core::properties::DexProperties;
 use serde::Serialize;
 use std::path::PathBuf;
 
@@ -39,13 +40,41 @@ struct Agent {
 struct TestEnv {
     conductors: SweetConductorBatch,
     agents: Vec<Agent>,
+    /// Everything minted so far, from successful `mint` calls.
+    minted: std::sync::Mutex<Amounts>,
+}
+
+/// The packed DNA with its properties replaced by `props`: a different DNA
+/// hash, so its own network.
+async fn dna_with(props: &DexProperties) -> DnaFile {
+    let bytes = ExternIO::encode(props).expect("properties encode").0;
+    let modifiers = DnaModifiersOpt { network_seed: None, properties: Some(SerializedBytes::from(UnsafeBytes::from(bytes))) };
+    SweetDnaFile::from_bundle_with_overrides(&dna_path(), modifiers)
+        .await
+        .expect("DNA bundle not found: run ./build.sh first")
+}
+
+/// The production properties with the test timing: 20 s to settle a park,
+/// then 5 s grace (design doc section 3).
+fn short_timing() -> DexProperties {
+    DexProperties { park_timeout_secs: 20, settle_grace_secs: 5, ..DexProperties::demo() }
 }
 
 impl TestEnv {
+    /// `n` agents on the packed DNA as built (production properties).
     async fn new(n: usize) -> Self {
         let dna = SweetDnaFile::from_bundle(&dna_path())
             .await
             .expect("DNA bundle not found: run ./build.sh first");
+        Self::with_dna(n, dna).await
+    }
+
+    /// `n` agents on the DNA with `props`.
+    async fn with_properties(n: usize, props: &DexProperties) -> Self {
+        Self::with_dna(n, dna_with(props).await).await
+    }
+
+    async fn with_dna(n: usize, dna: DnaFile) -> Self {
         let mut conductors = SweetConductorBatch::from_config_rendezvous(n, SweetConductorConfig::standard()).await;
         let apps = conductors
             .setup_app("dex", &[("dex".to_string(), dna)])
@@ -58,7 +87,7 @@ impl TestEnv {
             .map(|(conductor, cell)| Agent { conductor, cell })
             .collect();
         conductors.exchange_peer_info().await;
-        Self { conductors, agents }
+        Self { conductors, agents, minted: std::sync::Mutex::new(Amounts::ZERO) }
     }
 
     async fn zome_call<I, O>(&self, agent: usize, zome: &str, f: &str, input: I) -> ConductorApiResult<O>
@@ -67,9 +96,15 @@ impl TestEnv {
         O: serde::de::DeserializeOwned + std::fmt::Debug,
     {
         let a = &self.agents[agent];
-        self.conductors[a.conductor]
-            .call_fallible(&a.cell.zome(zome), f, input)
-            .await
+        // A mint's input is its amounts: keep count for `assert_supply`.
+        let mint = (zome == "ledger" && f == "mint").then(|| ExternIO::encode(&input).ok()).flatten();
+        let result = self.conductors[a.conductor].call_fallible(&a.cell.zome(zome), f, input).await;
+        if let (Ok(_), Some(io)) = (&result, mint) {
+            let amounts: Amounts = io.decode().expect("a mint's input is Amounts");
+            let mut minted = self.minted.lock().expect("not poisoned");
+            *minted = minted.checked_add(&amounts).expect("no overflow");
+        }
+        result
     }
 
     /// Call a `ledger` extern, panicking on error.
@@ -121,6 +156,14 @@ impl TestEnv {
             total = total.checked_add(&self.balance(agent).await.total).unwrap();
         }
         total
+    }
+
+    /// Supply is conserved: after syncing, Σ every agent's total equals
+    /// everything minted. Run after every scenario.
+    async fn assert_supply(&self) {
+        self.sync().await;
+        let minted = self.minted.lock().expect("not poisoned").clone();
+        assert_eq!(self.total_supply().await, minted, "total supply must equal what was minted");
     }
 
     async fn sync(&self) {
@@ -254,6 +297,7 @@ async fn mvp_end_to_end() {
     let state: EscrowState = env.call(ALICE, "get_escrow_state", escrow).await;
     assert!(state.closed);
     assert_eq!(state.remaining_lots, 0);
+    env.assert_supply().await;
 }
 
 /// §22: two takers race for the same 100 A. One fills, the other is refunded.
@@ -314,6 +358,7 @@ async fn two_takers_cannot_both_fill_the_same_escrow() {
         .count();
     assert_eq!((winners, refunded), (1, 1), "one fill, one full refund");
     assert_eq!(env.balance(ALICE).await.available, Amounts::new(0, 12_000));
+    env.assert_supply().await;
 }
 
 /// Validation rejects debits beyond the author's balance.
@@ -325,6 +370,7 @@ async fn cannot_escrow_more_than_the_balance() {
         .call_fallible(ALICE, "open_escrow", open(sell_100_at_1_20()))
         .await;
     assert!(result.is_err(), "100 A escrow with only 50 A must be rejected");
+    env.assert_supply().await;
 }
 
 /// Only the maker may execute their escrow's settlement runs.
@@ -346,6 +392,7 @@ async fn only_the_maker_can_run_the_escrow() {
         )
         .await;
     assert!(result.is_err());
+    env.assert_supply().await;
 }
 
 // ---------------------------------------------------------------------------
@@ -391,6 +438,7 @@ async fn placed_order_shows_in_the_book_until_cancelled() {
     assert_eq!(env.balance(ALICE).await.available, Amounts::new(10_000, 0));
     let mine: Vec<MyOrder> = env.dex(ALICE, "my_orders", ()).await;
     assert_eq!(mine[0].status, OrderStatus::Cancelled);
+    env.assert_supply().await;
 }
 
 /// Validation recomputes the listing tag from the escrow's terms.
@@ -429,6 +477,7 @@ async fn listing_with_a_tag_that_disagrees_with_the_escrow_is_rejected() {
         .await;
     env.sync().await;
     assert_eq!(env.book(BOB).await.asks, vec![level(120, 100, 1)]);
+    env.assert_supply().await;
 }
 
 /// Only an escrow's maker may list it.
@@ -447,6 +496,7 @@ async fn only_the_maker_can_list_an_escrow() {
     let _: ActionHash = env.dex(ALICE, "republish_listing", escrow).await;
     env.sync().await;
     assert_eq!(env.book(BOB).await.asks, vec![level(120, 100, 1)]);
+    env.assert_supply().await;
 }
 
 /// §13: a 60 A buy takes Alice's 40 at 1.20, then 20 of Carol's 35 at 1.21.
@@ -516,6 +566,7 @@ async fn take_across_two_orders_is_settled_by_each_maker() {
         .map(|p| (p.escrow.clone(), p.settlement.as_ref().map(|s| s.filled_lots)))
         .collect();
     assert_eq!(fills, vec![(carol_order, Some(20)), (alice_order, Some(40))], "newest first");
+    env.assert_supply().await;
 }
 
 // ---------------------------------------------------------------------------
@@ -605,6 +656,7 @@ async fn orders_leave_the_book_when_filled_or_expired() {
         .collect();
     assert_eq!(parks, vec![Some(0), Some(10)]);
     assert_eq!(env.total_supply().await, minted);
+    env.assert_supply().await;
 }
 
 /// Three makers at one price: the level lists them oldest first, and a take
@@ -651,6 +703,7 @@ async fn orders_at_one_price_fill_in_time_priority() {
     assert_eq!(env.balance(CAROL).await.available, Amounts::new(1_500, 5_000 - 1_800));
     assert_eq!(env.book(ALICE).await.asks, vec![level(120, 15, 2)]);
     assert_eq!(env.total_supply().await, minted);
+    env.assert_supply().await;
 }
 
 /// 21 parks exceed one run's cap of 20. Both `run_my_orders` (fill) and
@@ -690,6 +743,7 @@ async fn more_parks_than_one_run_takes_settle_in_one_call() {
     assert_eq!(parks.len(), 42);
     assert!(parks.iter().all(|p| p.settlement.is_some()), "no park left waiting");
     assert_eq!(env.total_supply().await, minted);
+    env.assert_supply().await;
 }
 
 // ---------------------------------------------------------------------------
@@ -773,6 +827,7 @@ async fn a_park_signals_the_maker_and_the_run_signals_the_taker() {
     env.sync().await;
     env.collect(BOB).await;
     assert_eq!(env.balance(BOB).await.available, Amounts::new(4_000, 0));
+    env.assert_supply().await;
 }
 
 // ---------------------------------------------------------------------------
@@ -841,6 +896,7 @@ async fn market_buy_sweeps_two_levels_from_two_makers() {
         .collect();
     assert_eq!(fills, vec![Some(20), Some(40)], "both makers filled in full");
     assert_eq!(env.total_supply().await, minted);
+    env.assert_supply().await;
 }
 
 /// The slippage limit keeps a far-away level out of the sweep; a budget
@@ -898,6 +954,7 @@ async fn slippage_limit_leaves_a_far_level_untouched() {
     assert!(far_pending.is_empty());
     assert_eq!(env.balance(BOB).await.available, Amounts::new(1_000, 9_000));
     assert_eq!(env.total_supply().await, minted);
+    env.assert_supply().await;
 }
 
 /// Another taker empties the best level first. The market order's park there
@@ -958,6 +1015,7 @@ async fn a_raced_market_order_is_refunded_and_retried_within_its_original_limit(
     assert_eq!((beyond_state.remaining_lots, beyond_state.runs), (10, 0), "never reached");
     assert_eq!(env.balance(BOB).await.available, Amounts::new(1_500, 10_000 - 1_815));
     assert_eq!(env.total_supply().await, minted);
+    env.assert_supply().await;
 }
 
 /// Symmetry: a market sell sweeps bids from the highest, paying in A.
@@ -984,4 +1042,7 @@ async fn market_sell_sweeps_bids() {
     assert_eq!(env.balance(ALICE).await.available, Amounts::new(1_000, 0));
     assert_eq!(env.balance(CAROL).await.available, Amounts::new(500, 0));
     assert_eq!(env.total_supply().await, minted);
+    env.assert_supply().await;
 }
+
+mod protection;

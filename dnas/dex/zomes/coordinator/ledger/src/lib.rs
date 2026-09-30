@@ -17,13 +17,13 @@
 //! nodes only.
 
 use dex_core::checkpoint::{CheckpointState, CHECKPOINT_AFTER_ACTIONS, CHECKPOINT_EVERY};
-use dex_core::properties::DexProperties;
+use dex_core::properties::{DexProperties, Timing};
 use dex_core::timeout::park_deadline;
 use dex_core::{execute_run, select_parks, ParkInput, RunInput};
 use hdk::prelude::*;
 use ledger_api::{
-    BalanceView, EscrowState, OpenEscrowRequest, ParkFill, ParkRequest, ParkSettlement, ParkStatus,
-    PendingPark, RunEscrowInput, RunReport,
+    BalanceView, CheckpointView, EscrowState, OpenEscrowRequest, ParkFill, ParkRequest, ParkSettlement,
+    ParkStatus, PendingPark, RawCheckpoint, RawPark, RawReclaim, RunEscrowInput, RunReport,
 };
 use ledger_integrity::*;
 use std::collections::BTreeSet;
@@ -118,7 +118,7 @@ pub fn run_escrow(input: RunEscrowInput) -> ExternResult<Option<RunReport>> {
         .into_iter()
         .filter(|p| {
             park_deadline(p.parked_at, escrow.terms.expires_at, &timing)
-                .is_some_and(|deadline| now.saturating_add(DEADLINE_MARGIN_US) < deadline)
+                .is_some_and(|deadline| now.saturating_add(deadline_margin(&timing)) < deadline)
         })
         .collect();
     let pending_count = pending.len();
@@ -237,8 +237,55 @@ pub fn reclaim_park(park: ActionHash) -> ExternResult<ActionHash> {
 }
 
 // ---------------------------------------------------------------------------
+// Test-only writes
+// ---------------------------------------------------------------------------
+//
+// Each writes one entry exactly as given, skipping the checks above, so a
+// test can show that validation (not this coordinator) refuses it. They can
+// write nothing validation accepts that the externs above could not.
+
+/// A park with a caller-chosen market and checkpoint citation, linked from
+/// its escrow like any park so the maker sees it.
+#[hdk_extern]
+pub fn park_raw(raw: RawPark) -> ExternResult<ActionHash> {
+    let park = create_entry(&EntryTypes::Park(Park {
+        escrow: raw.escrow.clone(),
+        market: raw.market,
+        amounts: raw.amounts,
+        requested_lots: raw.requested_lots,
+        checkpoint: raw.checkpoint,
+    }))?;
+    create_link(raw.escrow, park.clone(), LinkTypes::EscrowToParks, ())?;
+    Ok(park)
+}
+
+/// A reclaim citing any anchor.
+#[hdk_extern]
+pub fn reclaim_raw(raw: RawReclaim) -> ExternResult<ActionHash> {
+    create_entry(&EntryTypes::Reclaim(Reclaim { park: raw.park, anchor: raw.anchor }))
+}
+
+/// A checkpoint with any contents.
+#[hdk_extern]
+pub fn checkpoint_raw(raw: RawCheckpoint) -> ExternResult<ActionHash> {
+    create_entry(&EntryTypes::Checkpoint(Checkpoint { prev: raw.prev, state: raw.state }))
+}
+
+// ---------------------------------------------------------------------------
 // Reads
 // ---------------------------------------------------------------------------
+
+/// The caller's checkpoints, oldest first.
+#[hdk_extern]
+pub fn get_my_checkpoints() -> ExternResult<Vec<CheckpointView>> {
+    let mut out = Vec::new();
+    for record in query(ChainQueryFilter::new().include_entries(true))? {
+        if let Some(EntryTypes::Checkpoint(c)) = decode_record(&record)? {
+            out.push(CheckpointView { checkpoint: record.action_address().clone(), state: c.state });
+        }
+    }
+    Ok(out)
+}
 
 #[hdk_extern]
 pub fn get_escrow_state(escrow: ActionHash) -> ExternResult<EscrowState> {
@@ -443,6 +490,12 @@ fn get_escrow(hash: &ActionHash) -> ExternResult<(Record, Escrow)> {
 /// Parks within this long of their deadline are left for the taker to
 /// reclaim rather than consumed, so a run never races its own validation.
 const DEADLINE_MARGIN_US: i64 = 60_000_000;
+
+/// `DEADLINE_MARGIN_US`, but at most a fifth of the park's whole window, so a
+/// short window (a test DNA's 25 s) still leaves the maker most of it.
+fn deadline_margin(timing: &Timing) -> i64 {
+    DEADLINE_MARGIN_US.min(timing.park_timeout_us.saturating_add(timing.settle_grace_us) / 5)
+}
 
 /// The DNA properties; unusable properties are an error, never a default.
 fn props() -> ExternResult<DexProperties> {
