@@ -223,12 +223,24 @@ pub struct MarketRetry {
     pub result: Option<MarketResult>,
 }
 
-/// Sent between agents' dex zomes and re-emitted to the local UI.
+/// How one of the recipient's parks came out of a run.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct SignalFill {
+    pub park: ActionHash,
+    /// `0`: refunded in full.
+    pub filled_lots: u64,
+    pub requested_lots: u64,
+}
+
+/// Sent between agents' dex zomes and re-emitted to the local UI, or emitted
+/// to the local UI only (`OrderUpdated`).
 ///
 /// Signals are hints, never state: they can be lost, delayed or forged. A
 /// client reacts by re-reading and calling idempotent externs
 /// (`run_my_orders`, `collect_all`), and also polls, so a missed signal only
-/// delays settlement.
+/// delays settlement or a notification, never loses it. Each carries the
+/// stable ids (park, run, escrow and status) a client needs to dedupe it
+/// against what its next poll shows.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum DexSignal {
@@ -247,6 +259,17 @@ pub enum DexSignal {
         run: ActionHash,
         maker: AgentPubKey,
         mode: RunMode,
+        /// The recipient's own parks this run consumed.
+        #[serde(default)]
+        fills: Vec<SignalFill>,
+    },
+    /// The recipient's own order after a run they wrote (local only).
+    OrderUpdated {
+        escrow: ActionHash,
+        run: ActionHash,
+        status: OrderStatus,
+        filled_lots: u64,
+        lots: u64,
     },
 }
 
@@ -305,8 +328,23 @@ mod tests {
                 run: action(4),
                 maker: agent(5),
                 mode: RunMode::Fill,
+                fills: vec![SignalFill { park: action(2), filled_lots: 10, requested_lots: 40 }],
             },
             "run_settled",
+        );
+    }
+
+    #[test]
+    fn order_updated_is_tagged_and_round_trips() {
+        round_trip(
+            DexSignal::OrderUpdated {
+                escrow: action(1),
+                run: action(4),
+                status: OrderStatus::Partial,
+                filled_lots: 10,
+                lots: 40,
+            },
+            "order_updated",
         );
     }
 }

@@ -38,7 +38,8 @@
   }
   .filled,
   .settled,
-  .collected {
+  .collected,
+  .reclaimed {
     border-color: var(--bid);
   }
   .failed,
@@ -47,7 +48,9 @@
   }
   .refunded,
   .cancelled,
-  .incoming {
+  .incoming,
+  .reclaimable,
+  .waiting {
     border-color: var(--warn);
   }
 </style>

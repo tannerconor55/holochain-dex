@@ -813,7 +813,20 @@ async fn a_park_signals_the_maker_and_the_run_signals_the_taker() {
     let reports: Vec<RunReport> = env.dex(ALICE, "run_my_orders", ()).await;
     assert_eq!(reports.iter().map(|r| r.filled_lots).collect::<Vec<_>>(), vec![40]);
 
-    // Bob's client: a RunSettled signal arrives; it collects.
+    // Alice's own UI: the order's new status, from her run.
+    let signal = next_dex_signal(&mut alice_signals).await;
+    assert_eq!(
+        signal,
+        DexSignal::OrderUpdated {
+            escrow: order.clone(),
+            run: reports[0].run.clone(),
+            status: OrderStatus::Filled,
+            filled_lots: 40,
+            lots: 40,
+        }
+    );
+
+    // Bob's client: a RunSettled signal with his own fill arrives; it collects.
     let signal = next_dex_signal(&mut bob_signals).await;
     assert_eq!(
         signal,
@@ -822,6 +835,7 @@ async fn a_park_signals_the_maker_and_the_run_signals_the_taker() {
             run: reports[0].run.clone(),
             maker: env.key(ALICE),
             mode: RunMode::Fill,
+            fills: vec![dex_api::SignalFill { park: taken.parks[0].park.clone(), filled_lots: 40, requested_lots: 40 }],
         }
     );
     env.sync().await;

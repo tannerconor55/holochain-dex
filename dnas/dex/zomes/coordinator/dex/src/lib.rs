@@ -14,7 +14,7 @@ use dex_api::{
     BookView, Candle, CandlesRequest, DexConfig, DexSignal, MarketStats, RecentTradesRequest, Trade,
     MAX_RECENT_TRADES, FillChange, LevelQuery, MakerPresence, MarketAmount, MarketBudgetRequest,
     MarketInfo, MarketOrderRequest, MarketPlan, MarketPreviewRequest, MarketResult, MarketRetry, MyOrder,
-    Order, PlaceOrderRequest, PlacedPark, RawListing, RetryMarketRequest, TakePlan, TakeRequest,
+    Order, PlaceOrderRequest, PlacedPark, SignalFill, RawListing, RetryMarketRequest, TakePlan, TakeRequest,
     TakeResult, DEFAULT_MAX_SLIPPAGE_BPS,
 };
 use dex_core::book;
@@ -640,11 +640,14 @@ pub fn run_my_orders() -> ExternResult<Vec<RunReport>> {
 }
 
 /// Run `mode` until no park is left pending, at most `MAX_RUNS_PER_CALL` times.
-/// Each run's receivers other than the caller are told to collect.
+/// Each run's receivers other than the caller are told to collect, with how
+/// their own parks came out; the caller's UI is told the order's new status.
 fn run_until_settled(escrow: &ActionHash, mode: RunMode) -> ExternResult<Vec<RunReport>> {
     let me = my_key()?;
     let mut reports = Vec::new();
     for _ in 0..MAX_RUNS_PER_CALL {
+        // Who parked what, read before the run consumes it.
+        let pending: Vec<PendingPark> = ledger("get_pending_parks", escrow.clone())?;
         let report: Option<RunReport> = ledger(
             "run_escrow",
             RunEscrowInput {
@@ -654,15 +657,40 @@ fn run_until_settled(escrow: &ActionHash, mode: RunMode) -> ExternResult<Vec<Run
         )?;
         // `None`: a fill with nothing pending.
         let Some(report) = report else { break };
-        notify(
-            DexSignal::RunSettled {
-                escrow: escrow.clone(),
-                run: report.run.clone(),
-                maker: me.clone(),
-                mode,
-            },
-            report.receivers.iter().filter(|r| **r != me).cloned().collect(),
-        )?;
+        for receiver in report.receivers.iter().filter(|r| **r != me) {
+            let fills = report
+                .fills
+                .iter()
+                .filter_map(|f| {
+                    let p = pending.iter().find(|p| p.park == f.park && &p.taker == receiver)?;
+                    Some(SignalFill { park: f.park.clone(), filled_lots: f.filled_lots, requested_lots: p.requested_lots })
+                })
+                .collect();
+            notify(
+                DexSignal::RunSettled {
+                    escrow: escrow.clone(),
+                    run: report.run.clone(),
+                    maker: me.clone(),
+                    mode,
+                    fills,
+                },
+                vec![receiver.clone()],
+            )?;
+        }
+        let state: EscrowState = ledger("get_escrow_state", escrow.clone())?;
+        emit_signal(DexSignal::OrderUpdated {
+            escrow: escrow.clone(),
+            run: report.run.clone(),
+            status: book::order_status(
+                state.terms.lots,
+                state.filled_lots,
+                state.terms.expires_at,
+                state.released_at.map(|t| t.as_micros()),
+                now()?,
+            ),
+            filled_lots: state.filled_lots,
+            lots: state.terms.lots,
+        })?;
         let done = report.still_pending == 0;
         reports.push(report);
         if done {

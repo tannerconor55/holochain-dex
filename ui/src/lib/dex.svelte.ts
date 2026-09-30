@@ -1,8 +1,10 @@
-// App state: polling, signals, the maker's auto-run, and the activity feed.
+// App state: polling, signals, the maker's auto-run, notifications and the
+// activity feed.
 //
 // Signals are hints, never state (see dex_api::DexSignal). On any signal the
 // store re-reads and calls idempotent externs; it also polls, so a missed
-// signal only delays settlement.
+// signal only delays settlement. Every notification goes through `notify`
+// with a key both paths derive (lib/notify.ts), so each event is shown once.
 
 import {
   amt,
@@ -24,7 +26,8 @@ import {
   type UnitId,
 } from "./api";
 import type { ActionHash, AgentPubKey } from "@holochain/client";
-import { formatAmount } from "./format";
+import { formatAmount, formatCountdown } from "./format";
+import { noticeKey, Notices, toastMs, type NoticeLevel, type Toast } from "./notify";
 
 export const POLL_MS = 10_000;
 
@@ -35,6 +38,13 @@ export const POLL_MS = 10_000;
  * slow network would warn about makers who are fine.
  */
 export const PRESENCE_WINDOW_MS = 60_000;
+
+/**
+ * A park unsettled this long is checked for an offline maker. An online
+ * maker settles within a poll or two (signal plus 10 s poll), so a minute
+ * means something is wrong; the check runs at most once per window.
+ */
+export const WAITING_AFTER_MS = 60_000;
 const MAX_ACTIVITY = 50;
 
 export type ActivityKind =
@@ -48,6 +58,8 @@ export type ActivityKind =
   | "refunded"
   | "collected"
   | "reclaimed"
+  | "reclaimable"
+  | "waiting"
   | "failed";
 
 export interface Activity {
@@ -68,6 +80,8 @@ export class DexStore {
   /** When each agent (base64) was last known online, in ms. */
   lastSeen = $state<Record<string, number>>({});
   activity = $state<Activity[]>([]);
+  /** Notifications on screen, newest last. */
+  toasts = $state<Toast[]>([]);
   /** The last failed read, cleared by the next successful one. */
   readError = $state<string | null>(null);
   /** Writes currently queued or running, by label. */
@@ -77,9 +91,8 @@ export class DexStore {
   private queue: Promise<unknown> = Promise.resolve();
   private nextId = 0;
   private stopFns: (() => void)[] = [];
-  private seenStatus = new Map<string, MyOrder["status"]>();
-  private seenSettled = new Set<string>();
-  private seenReclaimed = new Set<string>();
+  private notices = new Notices();
+  private lastWaitingCheck = 0;
   private baselined = false;
 
   constructor(readonly api: DexApi) {}
@@ -160,6 +173,42 @@ export class DexStore {
         await this.refresh();
       }
     }
+    await this.checkWaiting();
+  }
+
+  /**
+   * Parks unsettled for `WAITING_AFTER_MS` are checked, once per window, for
+   * a maker who does not answer; each is reported once.
+   */
+  async checkWaiting(now = Date.now()): Promise<void> {
+    if (now - this.lastWaitingCheck < WAITING_AFTER_MS) return;
+    const waiting = (this.parks ?? []).filter(
+      (p) =>
+        !p.settlement &&
+        !p.reclaimed &&
+        now * 1000 - p.parked_at >= WAITING_AFTER_MS * 1000 &&
+        !this.notices.has(noticeKey.waiting(p.park)),
+    );
+    if (!waiting.length) return;
+    this.lastWaitingCheck = now;
+    let presence: MakerPresence[];
+    try {
+      presence = await this.checkMakers(waiting.map((p) => p.escrow));
+    } catch {
+      return; // advisory: try again next window
+    }
+    for (const p of waiting) {
+      const answer = presence.find((m) => b64(m.order) === b64(p.escrow));
+      if (!answer || answer.reachable || this.seenRecently(answer.maker)) continue;
+      const when =
+        p.deadline > now * 1000 ? `in ${formatCountdown(p.deadline, now * 1000)}` : "now, once they are back online";
+      this.notify(
+        noticeKey.waiting(p.park),
+        "waiting",
+        "warn",
+        `${this.pair(p.amounts)} parked on order ${shortHash(p.escrow)} is waiting on an offline maker. You can reclaim it ${when}.`,
+      );
+    }
   }
 
   // Markets and units
@@ -239,15 +288,87 @@ export class DexStore {
     if (done) await this.refresh();
   }
 
-  private async onSignal(signal: DexSignal): Promise<void> {
-    // Anyone who signals is online, whatever the signal says.
-    this.markSeen(signal.type === "park_placed" ? signal.taker : signal.maker);
-    if (signal.type === "park_placed") {
-      this.log("incoming", `A taker parked for ${signal.lots} lots on order ${shortHash(signal.escrow)}`);
-    } else {
-      this.log("settled", `Order ${shortHash(signal.escrow)} ran a ${signal.mode.toLowerCase()}: collecting`);
+  /** Handle a signal: notify at once, then re-read (the poll would too). */
+  async onSignal(signal: DexSignal): Promise<void> {
+    switch (signal.type) {
+      case "park_placed":
+        // Anyone who signals is online, whatever the signal says.
+        this.markSeen(signal.taker);
+        this.notify(
+          noticeKey.incoming(signal.park),
+          "incoming",
+          "info",
+          `A taker parked for ${signal.lots} lots on your order ${shortHash(signal.escrow)}: settling`,
+        );
+        break;
+      case "run_settled":
+        this.markSeen(signal.maker);
+        for (const f of signal.fills ?? []) {
+          this.notifyFill(f.park, signal.escrow, f.filled_lots, f.requested_lots);
+        }
+        break;
+      case "order_updated":
+        this.notifyOrder(signal.escrow, signal.status, signal.filled_lots, signal.lots, null);
+        break;
     }
-    await this.tick();
+    if (this.baselined) await this.tick();
+  }
+
+  /**
+   * Show `text` once per `key`: in the activity log, and as a toast unless
+   * `quiet`. Returns whether it was new.
+   */
+  notify(key: string, kind: ActivityKind, level: NoticeLevel, text: string, quiet = false): boolean {
+    if (!this.notices.claim(key)) return false;
+    this.log(kind, text);
+    if (!quiet) {
+      const toast = { id: this.nextId++, key, level, text };
+      this.toasts = [...this.toasts, toast];
+      const ms = toastMs(level);
+      if (ms !== null) setTimeout(() => this.dismiss(toast.id), ms);
+    }
+    return true;
+  }
+
+  dismiss(id: number): void {
+    this.toasts = this.toasts.filter((t) => t.id !== id);
+  }
+
+  private notifyFill(park: ActionHash, escrow: ActionHash, filled: number, requested: number, amounts?: Amounts): void {
+    const key = noticeKey.fill(park);
+    if (filled === 0) {
+      const what = amounts ? `: ${this.pair(amounts)} returned` : "";
+      this.notify(key, "refunded", "info", `Your take on order ${shortHash(escrow)} was refunded${what}`);
+    } else {
+      this.notify(key, "settled", "success", `Trade settled: ${filled} of ${requested} lots on order ${shortHash(escrow)}`);
+    }
+  }
+
+  private notifyOrder(
+    escrow: ActionHash,
+    status: MyOrder["status"],
+    filled: number,
+    lots: number,
+    order: MyOrder | null,
+  ): void {
+    const label = order ? orderLabel(order, this.marketById(order.state.market), this.fmtFn) : `order ${shortHash(escrow)}`;
+    const text: Record<MyOrder["status"], string> = {
+      Open: `Order created: ${label}`,
+      Partial: `Order partially filled: ${filled}/${lots} lots, ${label}`,
+      Filled: `Order filled: ${label}`,
+      Cancelled: `Order cancelled: ${label}`,
+      Expired: `Order expired: ${label}`,
+    };
+    const kind: Record<MyOrder["status"], ActivityKind> = {
+      Open: "created",
+      Partial: "partial",
+      Filled: "filled",
+      Cancelled: "cancelled",
+      Expired: "expired",
+    };
+    const level: NoticeLevel = status === "Filled" || status === "Partial" ? "success" : "info";
+    // Creating an order is the user's own action: log it, no toast.
+    this.notify(noticeKey.order(escrow, status, filled), kind[status], level, text[status], status === "Open");
   }
 
   /**
@@ -259,9 +380,14 @@ export class DexStore {
     this.pending = [...this.pending, label];
     const run = this.queue.then(async () => {
       try {
-        return await f();
+        const result = await f();
+        // A later failure of the same write is news again.
+        this.notices.release(noticeKey.failed(label, ""));
+        return result;
       } catch (e) {
-        this.log("failed", `${label} failed: ${message(e)}`);
+        const why = message(e);
+        const level: NoticeLevel = label === "Settling my orders" || label === "Collecting" ? "error" : "warn";
+        this.notify(noticeKey.failed(label, why), "failed", level, `${label} failed: ${why}`);
         return undefined;
       } finally {
         const i = this.pending.indexOf(label);
@@ -276,53 +402,38 @@ export class DexStore {
     this.activity = [{ id: this.nextId++, at: Date.now(), kind, text }, ...this.activity].slice(0, MAX_ACTIVITY);
   }
 
-  // Activity from diffing polls. The first successful read is a baseline and
-  // logs nothing, so reloading the page does not replay history.
+  // The poll fallback: notifications from diffing reads, with the keys the
+  // signals use. The first successful read is a baseline: its history is
+  // claimed silently so a reload does not replay it, but what needs action
+  // now (a reclaimable park) is still shown.
 
   private diffOrders(orders: MyOrder[]): void {
     for (const o of orders) {
-      const key = b64(o.state.escrow);
-      const before = this.seenStatus.get(key);
-      this.seenStatus.set(key, o.status);
-      if (!this.baselined || before === o.status) continue;
-      const label = orderLabel(o, this.marketById(o.state.market), this.fmtFn);
-      const text: Record<MyOrder["status"], string> = {
-        Open: `Order created: ${label}`,
-        Partial: `Order partially filled: ${o.state.filled_lots}/${o.state.terms.lots} lots, ${label}`,
-        Filled: `Order filled: ${label}`,
-        Cancelled: `Order cancelled: ${label}`,
-        Expired: `Order expired: ${label}`,
-      };
-      const kind: Record<MyOrder["status"], ActivityKind> = {
-        Open: "created",
-        Partial: "partial",
-        Filled: "filled",
-        Cancelled: "cancelled",
-        Expired: "expired",
-      };
-      this.log(kind[o.status], text[o.status]);
+      const key = noticeKey.order(o.state.escrow, o.status, o.state.filled_lots);
+      if (!this.baselined) {
+        this.notices.claim(key);
+        continue;
+      }
+      this.notifyOrder(o.state.escrow, o.status, o.state.filled_lots, o.state.terms.lots, o);
     }
   }
 
   private diffParks(parks: ParkStatus[]): void {
     for (const p of parks) {
       if (p.reclaimed) {
-        const key = b64(p.park);
-        if (this.seenReclaimed.has(key)) continue;
-        this.seenReclaimed.add(key);
-        if (this.baselined) this.log("reclaimed", `Reclaimed ${formatPair(p.amounts, this.fmtFn)} from order ${shortHash(p.escrow)}`);
-        continue;
-      }
-      if (!p.settlement) continue;
-      const key = b64(p.park);
-      if (this.seenSettled.has(key)) continue;
-      this.seenSettled.add(key);
-      if (!this.baselined) continue;
-      const filled = p.settlement.filled_lots;
-      if (filled === 0) {
-        this.log("refunded", `Take on order ${shortHash(p.escrow)} refunded: ${formatPair(p.amounts, this.fmtFn)} returned`);
-      } else {
-        this.log("settled", `Trade settled: ${filled} of ${p.requested_lots} lots on order ${shortHash(p.escrow)}`);
+        const key = noticeKey.reclaimed(p.park);
+        if (!this.baselined) this.notices.claim(key);
+        else this.notify(key, "reclaimed", "success", `Reclaimed ${this.pair(p.amounts)} from order ${shortHash(p.escrow)}`);
+      } else if (p.settlement) {
+        if (!this.baselined) this.notices.claim(noticeKey.fill(p.park));
+        else this.notifyFill(p.park, p.escrow, p.settlement.filled_lots, p.requested_lots, p.amounts);
+      } else if (p.reclaimable) {
+        this.notify(
+          noticeKey.reclaimable(p.park),
+          "reclaimable",
+          "warn",
+          `${this.pair(p.amounts)} parked on order ${shortHash(p.escrow)} was never settled: reclaim it under My takes`,
+        );
       }
     }
   }

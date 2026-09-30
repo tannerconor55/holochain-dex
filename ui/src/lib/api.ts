@@ -288,9 +288,17 @@ export interface MakerPresence {
   detail: string | null;
 }
 
+/** dex_api::SignalFill: one of the recipient's parks, as a run left it. */
+export interface SignalFill {
+  park: ActionHash;
+  filled_lots: number;
+  requested_lots: number;
+}
+
 export type DexSignal =
   | { type: "park_placed"; escrow: ActionHash; park: ActionHash; taker: AgentPubKey; lots: number }
-  | { type: "run_settled"; escrow: ActionHash; run: ActionHash; maker: AgentPubKey; mode: RunMode };
+  | { type: "run_settled"; escrow: ActionHash; run: ActionHash; maker: AgentPubKey; mode: RunMode; fills?: SignalFill[] }
+  | { type: "order_updated"; escrow: ActionHash; run: ActionHash; status: OrderStatus; filled_lots: number; lots: number };
 
 // ---------------------------------------------------------------------------
 // Calls
@@ -383,7 +391,7 @@ export class DexApi {
 export function parseDexSignal(signal: Signal): DexSignal | null {
   if (signal.type !== SignalType.App || signal.value.zome_name !== "dex") return null;
   const payload = signal.value.payload as { type?: unknown } | null;
-  if (payload?.type === "park_placed" || payload?.type === "run_settled") {
+  if (payload?.type === "park_placed" || payload?.type === "run_settled" || payload?.type === "order_updated") {
     return payload as DexSignal;
   }
   return null;
