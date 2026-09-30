@@ -4,6 +4,7 @@ members = [
     "crates/dex_core",
     "crates/ledger_api",
     "crates/dex_api",
+    "crates/dex_trades",
     "dnas/dex/zomes/integrity/ledger",
     "dnas/dex/zomes/integrity/dex",
     "dnas/dex/zomes/coordinator/ledger",
@@ -23,6 +24,7 @@ holochain_serialized_bytes = "=0.0.57"
 dex_core = { path = "crates/dex_core" }
 ledger_api = { path = "crates/ledger_api" }
 dex_api = { path = "crates/dex_api" }
+dex_trades = { path = "crates/dex_trades" }
 ledger_integrity = { path = "dnas/dex/zomes/integrity/ledger" }
 dex_integrity = { path = "dnas/dex/zomes/integrity/dex" }
 

@@ -247,6 +247,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "dex_trades"
+version = "0.1.0"
+dependencies = [
+ "dex_core",
+ "serde",
+]
+
+[[package]]
 name = "digest"
 version = "0.10.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"

@@ -28,8 +28,13 @@ skills.
 - Pinned: `hdk =0.7.0`, `hdi =0.8.0`, `holochain =0.7.0` (holonix `main-0.7`). Verify HDK/HDI APIs
   against the pinned crate source or docs.rs at that version, never from memory.
 - `dnas/dex/zomes/integrity/**` (except `integrity/*/tests/`) and
-  `dnas/dex/dna.yaml`, including its properties, change the DNA hash.
-  Flag it in every change; commit integrity changes separately.
+  `dnas/dex/dna.yaml`, including its properties, change the DNA hash. So does
+  **any** change to `crates/dex_core` or `crates/ledger_api`: both integrity
+  zomes link them, and even an unused new module changes their wasm. Flag it
+  in every change; commit integrity changes separately. Check with
+  `sha256sum target/wasm32-unknown-unknown/release/*_integrity.wasm` before
+  and after `./build.sh`. Logic validation never needs (trade history,
+  stats) goes in its own crate, like `crates/dex_trades`.
 - Settlement arithmetic lives in `crates/dex_core` only, as integer minor units.
   Validation and coordinator both call `dex_core::execute_run`; never fork the
   logic. It is the reference for the future Rhai template.

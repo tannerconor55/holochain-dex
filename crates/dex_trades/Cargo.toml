@@ -1,0 +1,13 @@
+[package]
+name = "dex_trades"
+version = "0.1.0"
+edition = "2021"
+description = "Trades, market stats and candles derived from settlement runs (pure)"
+
+# Kept out of dex_core on purpose: both integrity zomes link dex_core, so any
+# change to it changes their wasm and the DNA hash. Nothing in validation
+# needs trade history, and only coordinators and tests depend on this crate.
+
+[dependencies]
+serde = { workspace = true }
+dex_core = { workspace = true }
