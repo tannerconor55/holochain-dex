@@ -13,6 +13,9 @@
   --warn: #8a5a00;
   --warn-bg: #fdf1d8;
   --focus: #2553c7;
+  /* Chart series slot 1 (dataviz reference palette), validated on --panel. */
+  --series-1: #2a78d6;
+  --series-1-wash: rgb(42 120 214 / 0.1);
   --radius: 8px;
   color-scheme: light;
 }
@@ -33,6 +36,8 @@
     --warn: #f5c56b;
     --warn-bg: #352a14;
     --focus: #7ea2ff;
+    --series-1: #3987e5;
+    --series-1-wash: rgb(57 135 229 / 0.12);
     color-scheme: dark;
   }
 }

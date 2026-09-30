@@ -71,6 +71,20 @@ export function formatAveragePrice(quoteMinor: number, lots: number, decimals = 
   return `${Number(whole).toLocaleString("en-US")}.${frac}`;
 }
 
+/**
+ * A price change as a signed percentage of the opening price, 2 decimals,
+ * integer maths (rounded toward zero): (121 − 120) / 120 → "+0.83%".
+ * `null` without an opening price.
+ */
+export function formatChangePercent(change: number, open: number): string | null {
+  if (!Number.isSafeInteger(change) || !Number.isSafeInteger(open) || open <= 0) return null;
+  const bps = (BigInt(Math.abs(change)) * 10_000n) / BigInt(open);
+  const whole = bps / 100n;
+  const frac = (bps % 100n).toString().padStart(2, "0");
+  const sign = change > 0 ? "+" : change < 0 ? "−" : "";
+  return `${sign}${whole}.${frac}%`;
+}
+
 /** Percent text with up to 2 decimals → basis points: "2" → 200, "0.5" → 50. */
 export function parseBps(text: string): number | null {
   return parseAmount(text);

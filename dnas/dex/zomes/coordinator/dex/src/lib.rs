@@ -317,8 +317,9 @@ fn order_view(state: EscrowState) -> Order {
 // so an order expired before the window cannot have traded in it.
 //
 // Where a cache would go: runs are immutable once written, so a closed
-// order's trades never change. A client can keep trades by run hash and
-// only re-read open orders (the UI does this per session). A network-wide
+// order's trades never change; a cache of trades by run hash, re-reading
+// only open orders, would cut the per-run reads. The UI does not cache: it
+// re-reads price data at most every 30 s and on settlement signals. A network-wide
 // index (for example a per-market, per-day link to each run, written by the
 // maker with the run) would bound reads by the window instead of by the
 // market's history, but needs a new link type: an integrity change.

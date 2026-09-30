@@ -70,7 +70,10 @@ test("Alice sells, Bob takes 40, Alice cancels the rest", async ({ browser }) =>
   const take = region(bob, "Buy A at 1.20 HF or better");
   await take.getByLabel("Quantity (A)").fill("40");
   await take.getByRole("button", { name: "Park 48.00 HF" }).click();
-  // Alice's client settles on the signal (or the next poll).
+  // Alice's client settles on the signal (or the next poll). Bob's toast
+  // comes from the run's signal, which can arrive before his node sees the
+  // run, and fades after 8 s: look for it first, then for the settled park.
+  await expect(bob.getByRole("status", { name: "Notifications" })).toContainText("Trade settled: 40 of 40 lots");
   await expect(take).toContainText("filled 40 lots");
 
   // 4. Alice: +48.00 HF, 60 A still locked; the book shows 1.20 · 60.
@@ -91,6 +94,15 @@ test("Alice sells, Bob takes 40, Alice cancels the rest", async ({ browser }) =>
   await expect(region(alice, "Activity")).toContainText("Order partially filled: 40/100 lots");
   await expect(region(alice, "Activity")).toContainText("Order cancelled");
   await expect(region(bob, "Activity")).toContainText("Trade settled: 40 of 40 lots");
+
+  // 8. The trade shows in both agents' price data (refreshed on the run signal).
+  const trades = region(bob, "Recent trades");
+  await expect(trades.getByRole("row", { name: /Buy 1\.20 40/ })).toBeVisible();
+  await expect(region(alice, "Recent trades").getByRole("row", { name: /Buy 1\.20 40/ })).toBeVisible();
+  const stats = bob.getByLabel("Market stats for A/HF");
+  await expect(stats).toContainText("1.20");
+  await expect(stats).toContainText("40 lots");
+  await expect(region(bob, "Price").getByRole("slider")).toBeVisible();
 
   // For eyeballing the layout (test-results/ is gitignored).
   await alice.screenshot({ path: "test-results/alice.png", fullPage: true });
@@ -143,7 +155,16 @@ test("market buy within 2% slippage, then its one retry", async ({ browser }) =>
   await expect(await balanceRow(bob, "Available")).toContainText("50.00");
   await expect(await balanceRow(bob, "Available")).toContainText("140.00");
 
+  // Two trades now: the chart and the feed show both.
+  await expect(region(bob, "Recent trades").getByRole("row", { name: /Buy 1\.20 10/ })).toBeVisible();
+  const chart = region(bob, "Price");
+  await chart.getByRole("slider").focus();
+  await bob.keyboard.press("ArrowLeft"); // the crosshair, from the keyboard
+
   await bob.screenshot({ path: "test-results/bob-market.png", fullPage: true });
+  await chart.screenshot({ path: "test-results/chart.png" });
+  await bob.emulateMedia({ colorScheme: "dark" });
+  await chart.screenshot({ path: "test-results/chart-dark.png" });
   await alice.context().close();
   await bob.context().close();
 });

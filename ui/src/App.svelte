@@ -8,6 +8,10 @@
   import TakePanel from "./components/TakePanel.svelte";
   import MyOrders from "./components/MyOrders.svelte";
   import ActivityFeed from "./components/Activity.svelte";
+  import PriceStats from "./components/PriceStats.svelte";
+  import PriceChart from "./components/PriceChart.svelte";
+  import RecentTrades from "./components/RecentTrades.svelte";
+  import Toasts from "./components/Toasts.svelte";
   import type { Side } from "./lib/api";
 
   let store = $state<DexStore | null>(null);
@@ -42,6 +46,7 @@
     </label>
   {/if}
   {#if store}
+    <PriceStats {store} />
     <span class="muted agent" title="Your agent key">agent …{shortHash(store.api.me)}</span>
     {#if store.pending.length}
       <span class="muted" aria-live="polite">{store.pending[0]}…</span>
@@ -76,12 +81,15 @@
       {#if selection}
         <TakePanel {store} {selection} onclose={() => (selection = null)} />
       {/if}
+      <PriceChart {store} />
+      <RecentTrades {store} />
     </div>
     <div class="col">
       <MyOrders {store} />
       <ActivityFeed {store} />
     </div>
   </main>
+  <Toasts {store} />
 {/if}
 
 <style>

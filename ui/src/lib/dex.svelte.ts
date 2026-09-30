@@ -15,14 +15,18 @@ import {
   type Amounts,
   type BalanceView,
   type BookView,
+  type Candle,
+  type CandleInterval,
   type DexApi,
   type DexConfig,
   type DexSignal,
   type MakerPresence,
   type MarketId,
   type MarketInfo,
+  type MarketStats,
   type MyOrder,
   type ParkStatus,
+  type Trade,
   type UnitId,
 } from "./api";
 import type { ActionHash, AgentPubKey } from "@holochain/client";
@@ -45,6 +49,33 @@ export const PRESENCE_WINDOW_MS = 60_000;
  * means something is wrong; the check runs at most once per window.
  */
 export const WAITING_AFTER_MS = 60_000;
+
+/**
+ * Price data is re-read at most this often, and on settlement signals. Each
+ * read walks every order ever listed in the market (see the dex zome's
+ * trade-history comment), so it runs at a third of the book's pace.
+ */
+export const PRICE_POLL_MS = 30_000;
+
+export type ChartRange = "1h" | "24h" | "7d";
+
+/** Each chart range and the candle width that gives it 60–168 points. */
+export const CHART_RANGES: Record<ChartRange, { ms: number; interval: CandleInterval; label: string }> = {
+  "1h": { ms: 3_600_000, interval: "M1", label: "1 h" },
+  "24h": { ms: 86_400_000, interval: "M15", label: "24 h" },
+  "7d": { ms: 7 * 86_400_000, interval: "H1", label: "7 d" },
+};
+
+export const INTERVAL_MS: Record<CandleInterval, number> = {
+  M1: 60_000,
+  M5: 300_000,
+  M15: 900_000,
+  H1: 3_600_000,
+  H4: 14_400_000,
+  D1: 86_400_000,
+};
+
+export const RECENT_TRADES = 30;
 const MAX_ACTIVITY = 50;
 
 export type ActivityKind =
@@ -80,6 +111,14 @@ export class DexStore {
   /** When each agent (base64) was last known online, in ms. */
   lastSeen = $state<Record<string, number>>({});
   activity = $state<Activity[]>([]);
+  stats = $state<MarketStats | null>(null);
+  trades = $state<Trade[] | null>(null);
+  candles = $state<Candle[] | null>(null);
+  chartRange = $state<ChartRange>("24h");
+  /** The window the current candles cover, µs: [from, to). */
+  candleWindow = $state<{ from: number; to: number } | null>(null);
+  /** A price read in flight: the chart keeps its last render, dimmed. */
+  priceLoading = $state(false);
   /** Notifications on screen, newest last. */
   toasts = $state<Toast[]>([]);
   /** The last failed read, cleared by the next successful one. */
@@ -93,6 +132,7 @@ export class DexStore {
   private stopFns: (() => void)[] = [];
   private notices = new Notices();
   private lastWaitingCheck = 0;
+  private lastPrices = 0;
   private baselined = false;
 
   constructor(readonly api: DexApi) {}
@@ -113,6 +153,46 @@ export class DexStore {
   async tick(): Promise<void> {
     await this.refresh();
     await this.maintain();
+    await this.refreshPrices();
+  }
+
+  /**
+   * Re-read trades, stats and candles for the selected market and range; at
+   * most every `PRICE_POLL_MS` unless `force`. Like `refresh`, a failed read
+   * keeps what was shown.
+   */
+  async refreshPrices(force = false, now = Date.now()): Promise<void> {
+    if (!force && now - this.lastPrices < PRICE_POLL_MS) return;
+    if (!this.config) return;
+    this.lastPrices = now;
+    const market = this.marketId;
+    const range = CHART_RANGES[this.chartRange];
+    const to = (now + INTERVAL_MS[range.interval]) * 1000;
+    const from = to - range.ms * 1000;
+    this.priceLoading = true;
+    const same = () => market === this.marketId;
+    try {
+      await Promise.all([
+        this.api.recentTrades(market, RECENT_TRADES).then((v) => same() && (this.trades = v)).catch(() => {}),
+        this.api.marketStats(market).then((v) => same() && (this.stats = v)).catch(() => {}),
+        this.api
+          .candles(market, range.interval, from, to)
+          .then((v) => {
+            if (!same()) return;
+            this.candles = v;
+            this.candleWindow = { from, to };
+          })
+          .catch(() => {}),
+      ]);
+    } finally {
+      this.priceLoading = false;
+    }
+  }
+
+  setChartRange(range: ChartRange): void {
+    if (range === this.chartRange) return;
+    this.chartRange = range;
+    void this.refreshPrices(true);
   }
 
   /**
@@ -261,7 +341,11 @@ export class DexStore {
     if (id === this.marketId) return;
     this.marketId = id;
     this.book = null;
+    this.stats = null;
+    this.trades = null;
+    this.candles = null;
     void this.refresh();
+    void this.refreshPrices(true);
   }
 
   // Maker presence (advisory: see dex_api::MakerPresence)
@@ -311,7 +395,11 @@ export class DexStore {
         this.notifyOrder(signal.escrow, signal.status, signal.filled_lots, signal.lots, null);
         break;
     }
-    if (this.baselined) await this.tick();
+    if (this.baselined) {
+      await this.tick();
+      // A run means a trade: show it without waiting for the price poll.
+      if (signal.type !== "park_placed") await this.refreshPrices(true);
+    }
   }
 
   /**
