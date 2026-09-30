@@ -17,3 +17,9 @@ dex_api = { path = "../../crates/dex_api" }
 holochain = { version = "=0.7.0", features = ["test_utils"] }
 serde = { version = "1", features = ["derive"] }
 tokio = { version = "1", features = ["full"] }
+
+# The conductor compiles every zome's wasm with Cranelift on first use; an
+# unoptimised build of `holochain` makes that take ~30 s per agent. Optimise
+# dependencies (not this crate, so test edits rebuild fast).
+[profile.dev.package."*"]
+opt-level = 3
