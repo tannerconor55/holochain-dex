@@ -32,9 +32,10 @@
         },
         "filled_lots": { "type": "integer" },
         "remaining_lots": { "type": "integer" },
-        "deferred_parks": { "type": "integer" }
+        "deferred_parks": { "type": "integer" },
+        "expired_parks": { "type": "integer" }
       },
-      "required": ["mode", "consumed", "outcomes", "filled_lots", "remaining_lots", "deferred_parks"]
+      "required": ["mode", "consumed", "outcomes", "filled_lots", "remaining_lots", "deferred_parks", "expired_parks"]
     }
   },
   "required": ["unyt_allocation", "locked", "computed_values"]

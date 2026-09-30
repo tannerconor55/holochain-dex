@@ -4,6 +4,7 @@
     { "name": "maker_spender_allocations", "instruction": { "ProvidedBy": "maker_spender" } },
     { "name": "taker_spender_allocations", "instruction": { "ProvidedBy": "taker_spender" } },
     { "name": "requested_lots", "instruction": { "ProvidedBy": "taker_spender" } },
+    { "name": "park_deadline", "instruction": { "ProvidedBy": "taker_spender" } },
     { "name": "previous_execution", "instruction": { "Custom": "GetPreviousExecution" } },
     { "name": "side", "instruction": { "Fixed": "Sell" } },
     { "name": "price_per_lot", "instruction": { "Fixed": 120 } },
@@ -26,7 +27,7 @@
     {
       "ct_role_id": "taker_spender",
       "display_name": "Taker",
-      "description": "Parks a spend in the taker asset with { \"requested_lots\": <n> } in the spend's payload. Anyone may take.",
+      "description": "Parks a spend in the taker asset with { \"requested_lots\": <n>, \"park_deadline\": <micros> } in the spend's payload. Anyone may take.",
       "qualification": { "Any": null }
     }
   ],

@@ -29,6 +29,10 @@
         "requested_lots": {
           "type": "array",
           "items": { "type": "integer", "minimum": 0 }
+        },
+        "park_deadline": {
+          "type": "array",
+          "items": { "type": "integer" }
         }
       }
     },

@@ -12,6 +12,10 @@
 ///   `{ amount, source }` per parked link, paid in the taker asset.
 /// requested_lots: lots each taker wants, read from the payload of the same
 ///   taker spend link (paired by `link_hash`).
+/// park_deadline: the park's deadline, microseconds since the Unix epoch,
+///   declared by the taker in the same payload: min(parked_at + park timeout,
+///   expires_at) + settle grace (dex_core::timeout::park_deadline). A run may
+///   consume a park only before it.
 /// previous_execution: `{ id, output }` of this executor's last run of this
 ///   agreement (Custom GetPreviousExecution); its `output.locked` is the
 ///   carried lock and its `id` the source a lock-funded allocation names.
@@ -34,6 +38,8 @@
 ///          or 0 when releasing or past expiry;
 /// the taker receives `fill` lots of the maker asset plus a refund of every
 /// unit not spent on the fill, and the maker receives the fill's cost.
+/// A spend at or past its declared deadline, or with none, is returned in
+/// `rejected_links` and never consumed: it stays parked for its taker.
 /// Spends beyond max_parks_per_run are returned in `rejected_links` and wait
 /// for the next run. Per unit: paid + locked == parked sources + previous lock.
 
@@ -251,6 +257,10 @@ let requested = #{};
 for r in consumed_inputs.requested_lots ?? [] {
     requested[r.link_hash] = r.data;
 }
+let deadlines = #{};
+for d in consumed_inputs.park_deadline ?? [] {
+    deadlines[d.link_hash] = d.data;
+}
 let seen = [];
 for e in taker_spends {
     if seen.contains(e.data.source) { throw "a park appears twice in one run"; }
@@ -261,10 +271,20 @@ presorted.sort(|a, b| by_source(a, b));
 let ordered = acceding_sort_allocation(presorted.map(|e| e.data));
 if ordered.len() != taker_spends.len() { throw "a taker spend did not resolve to a parked link"; }
 
+// In time order: a park past its deadline is refused outright (the run may
+// not consume it: dex_core::timeout::run_may_consume); the rest fill the cap.
 let rejected_links = [];
+let expired_parks = 0;
 let parks = [];
 for p in ordered {
-    if parks.len() < cap {
+    let deadline = deadlines[p.source];
+    if type_of(deadline) != "i64" {
+        expired_parks += 1;
+        rejected_links.push(#{ "hash": p.source, "reason": "no park_deadline in the spend payload; not consumable" });
+    } else if now >= deadline {
+        expired_parks += 1;
+        rejected_links.push(#{ "hash": p.source, "reason": "past its park_deadline; stays parked for its taker" });
+    } else if parks.len() < cap {
         parks.push(p);
     } else {
         rejected_links.push(#{ "hash": p.source, "reason": "beyond max_parks_per_run; waits for the next run" });
@@ -355,7 +375,8 @@ for r in book.receivers {
             "outcomes": outcomes,
             "filled_lots": filled_total,
             "remaining_lots": if mode == "Fill" { remaining } else { 0 },
-            "deferred_parks": rejected_links.len()
+            "deferred_parks": rejected_links.len() - expired_parks,
+            "expired_parks": expired_parks
         }
     },
     "rejected_links": rejected_links

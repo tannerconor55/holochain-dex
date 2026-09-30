@@ -3,11 +3,19 @@
 //! draws in the same order), each run as the opening run and as a later run.
 
 use crate::engine::*;
+use dex_core::properties::Timing;
+use dex_core::timeout::park_deadline;
 use dex_core::{Amounts, MarketDef, OrderTerms, RunMode, Side, MAX_PARKS_PER_RUN};
 
 const NOW: i64 = 1_000_000;
 const LATER: i64 = 2_000_000;
 const CASES: usize = 2_000;
+
+/// Deadlines straddling NOW: parked at 0..9 µs, a park is consumable at NOW
+/// only when parked at 5 µs or later (and never once the order expired at
+/// NOW), so most cases mix consumable and expired parks. Derived from the
+/// drawn values, not drawn, so the sequence matches dex_core's generator.
+const TIMING: Timing = Timing { park_timeout_us: 999_995, settle_grace_us: 1 };
 
 fn generated() -> Vec<Case> {
     let mut seed: u64 = 0x5eed;
@@ -34,6 +42,10 @@ fn generated() -> Vec<Case> {
                     next(10) as i64,
                 )
             })
+            .map(|p| {
+                let deadline = park_deadline(p.parked_at, terms.expires_at, &TIMING);
+                p.until(deadline)
+            })
             .collect();
         let mode = if next(3) == 0 { RunMode::Release } else { RunMode::Fill };
         cases.push(Case { terms, start: Start::Opening, parks, now: NOW, mode });
@@ -45,7 +57,9 @@ fn generated() -> Vec<Case> {
 fn template_matches_execute_run_on_generated_cases() {
     let mut runs = 0;
     let mut fills = 0;
+    let mut expired = 0;
     for c in generated() {
+        expired += c.parks.iter().filter(|p| p.deadline.is_some_and(|d| NOW >= d)).count();
         let lock = c.terms.initial_lock(&MarketDef::default_pair()).unwrap();
         for start in [Start::Opening, Start::Locked(lock)] {
             let case = Case { start, ..c.clone() };
@@ -56,7 +70,8 @@ fn template_matches_execute_run_on_generated_cases() {
     }
     assert_eq!(runs, 2 * CASES);
     assert!(fills > 0, "the generator fills something");
-    println!("parity: {runs} runs identical to dex_core ({fills} lots filled)");
+    assert!(expired > CASES, "the generator puts parks past their deadline: {expired}");
+    println!("parity: {runs} runs identical to dex_core ({fills} lots filled, {expired} parks past their deadline)");
 }
 
 #[test]

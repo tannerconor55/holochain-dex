@@ -289,3 +289,73 @@ fn the_opening_run_names_the_maker_spend_in_a_name_only_allocation() {
     assert!(serde_json::to_value(&allocations[0].amounts).unwrap().as_object().unwrap().is_empty(), "amounts {{}}");
     assert_eq!(r.locked, terms.initial_lock(&MarketDef::default_pair()).unwrap());
 }
+
+// ---------------------------------------------------------------------------
+// Park deadlines (taker-declared in the spend payload)
+// ---------------------------------------------------------------------------
+
+fn reasons(r: &RhaiRun) -> Vec<String> {
+    // `reason` is private in rave_engine; its serialized form is not.
+    r.engine
+        .rejected_links
+        .iter()
+        .map(|l| serde_json::to_value(l).expect("serialize")["reason"].as_str().expect("a reason").to_string())
+        .collect()
+}
+
+#[test]
+fn a_park_at_or_past_its_deadline_is_rejected_not_consumed() {
+    let terms = alice_sell_100();
+    let lock = terms.initial_lock(&MarketDef::default_pair()).unwrap();
+    for mode in [RunMode::Fill, RunMode::Release] {
+        let r = both(case(
+            terms,
+            lock.clone(),
+            vec![
+                park(1, BOB, Amounts::new(0, 4_800), 40, NOW - 30).until(Some(NOW)), // at D: too late
+                park(2, CAROL, Amounts::new(0, 2_400), 20, NOW - 20).until(Some(NOW + 1)), // D − 1µs: in time
+                park(3, BOB, Amounts::new(0, 1_200), 10, NOW - 10).until(Some(NOW - 5)), // past D
+            ],
+            mode,
+        ));
+        assert_eq!(r.consumed, vec![park_id(2)], "{mode:?}: only the park still in time");
+        assert_eq!(r.rejected, vec![park_id(1), park_id(3)], "{mode:?}: the others stay parked");
+        assert!(reasons(&r).iter().all(|why| why.contains("past its park_deadline")), "{:?}", reasons(&r));
+        let carol = paid_to(&r, CAROL);
+        match mode {
+            RunMode::Fill => assert_eq!(carol, Amounts::new(2_000, 0), "Carol's 20 lots fill"),
+            RunMode::Release => assert_eq!(carol, Amounts::new(0, 2_400), "Carol is refunded"),
+        }
+        assert_eq!(r.engine.output.computed_values.as_ref().unwrap()["expired_parks"], 2);
+    }
+}
+
+#[test]
+fn a_park_declaring_no_deadline_is_rejected() {
+    let terms = alice_sell_100();
+    let r = both(case(
+        terms,
+        terms.initial_lock(&MarketDef::default_pair()).unwrap(),
+        vec![park(1, BOB, Amounts::new(0, 4_800), 40, NOW - 10).until(None)],
+        RunMode::Fill,
+    ));
+    assert!(r.consumed.is_empty());
+    assert_eq!(r.rejected, vec![park_id(1)]);
+    assert!(reasons(&r)[0].contains("no park_deadline"));
+}
+
+#[test]
+fn expired_parks_do_not_count_against_the_cap() {
+    // 3 expired parks among the oldest, then 21 in time: the cap takes 20 of
+    // the 21, so 4 are left out in time order (3 expired, 1 deferred).
+    let terms = OrderTerms { lots: 10_000, ..alice_sell_100() };
+    let mut parks: Vec<Park> = (0..3u32)
+        .map(|i| park(i, BOB, Amounts::new(0, 120), 1, NOW - 100 + i64::from(i)).until(Some(NOW - 1)))
+        .collect();
+    parks.extend((3..24u32).map(|i| park(i, CAROL, Amounts::new(0, 120), 1, NOW - 50 + i64::from(i))));
+    let r = both(case(terms, terms.initial_lock(&MarketDef::default_pair()).unwrap(), parks, RunMode::Fill));
+    assert_eq!(r.consumed.len(), MAX_PARKS_PER_RUN);
+    assert_eq!(r.rejected, vec![park_id(0), park_id(1), park_id(2), park_id(23)]);
+    let cv = r.engine.output.computed_values.clone().unwrap();
+    assert_eq!((cv["expired_parks"].as_u64(), cv["deferred_parks"].as_u64()), (Some(3), Some(1)));
+}

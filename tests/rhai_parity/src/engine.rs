@@ -1,5 +1,6 @@
 //! Running one settlement run both ways, and comparing them.
 
+use dex_core::timeout::run_may_consume;
 use dex_core::{execute_run, select_parks, Amounts, CoreError, OrderTerms, ParkInput, RunInput, RunMode, RunOutput, Side, MarketDef, MAX_PARKS_PER_RUN};
 use hdi::prelude::*;
 use hdk::hdk::set_hdk;
@@ -58,10 +59,21 @@ pub struct Park {
     pub amounts: Amounts,
     pub requested_lots: u64,
     pub parked_at: i64,
+    /// The taker-declared deadline in the spend payload; `None` declares none.
+    pub deadline: Option<i64>,
 }
 
+/// A deadline no case reaches.
+pub const FAR: i64 = 1 << 60;
+
 pub fn park(id: u32, taker: u8, amounts: Amounts, requested_lots: u64, parked_at: i64) -> Park {
-    Park { id, taker, amounts, requested_lots, parked_at }
+    Park { id, taker, amounts, requested_lots, parked_at, deadline: Some(FAR) }
+}
+
+impl Park {
+    pub fn until(self, deadline: Option<i64>) -> Park {
+        Park { deadline, ..self }
+    }
 }
 
 /// Where a run's lock comes from.
@@ -144,12 +156,12 @@ pub fn amounts_of(map: &UnitMap) -> Amounts {
 // The host: parked-link records for acceding_sort_allocation
 // ---------------------------------------------------------------------------
 
-fn parked_spend_record(role: &str, author: AgentPubKey, timestamp: i64, amount: Amounts, requested: Option<u64>) -> Record {
+fn parked_spend_record(role: &str, author: AgentPubKey, timestamp: i64, amount: Amounts, payload: Value) -> Record {
     let tag = rmp_serde::to_vec_named(&ParkedSpendData {
         ct_role_id: role.to_string(),
         amount: unit_map(&amount),
         fee: UnitMap::new(),
-        payload: requested.map_or(Value::Null, |n| json!({ "requested_lots": n })),
+        payload,
         global_definition: hash(0x55, 0),
         lane_definitions: Vec::new(),
         new_balance: UnitMap::new(),
@@ -203,7 +215,13 @@ fn install_host(case: &Case) {
     for p in &case.parks {
         records.insert(
             hash(0x11, p.id),
-            parked_spend_record("taker_spender", agent(p.taker), p.parked_at, p.amounts.clone(), Some(p.requested_lots)),
+            parked_spend_record(
+                "taker_spender",
+                agent(p.taker),
+                p.parked_at,
+                p.amounts.clone(),
+                json!({ "requested_lots": p.requested_lots, "park_deadline": p.deadline }),
+            ),
         );
     }
     let mut mock = MockHdkT::new();
@@ -268,8 +286,15 @@ pub fn input_json(case: &Case) -> Value {
         .iter()
         .map(|p| linked(json!(p.requested_lots), &hash(0x11, p.id)))
         .collect();
+    // A spend declaring no deadline has no `park_deadline` value to provide.
+    let deadlines = case
+        .parks
+        .iter()
+        .filter_map(|p| p.deadline.map(|d| linked(json!(d), &hash(0x11, p.id))))
+        .collect();
     consumed.insert("taker_spender_allocations".into(), RAVEInputStdPayload::Vec(spends));
     consumed.insert("requested_lots".into(), RAVEInputStdPayload::Vec(requests));
+    consumed.insert("park_deadline".into(), RAVEInputStdPayload::Vec(deadlines));
 
     let mut inputs = RAVEInputHandler::new();
     let prev = previous_output(case)
@@ -361,23 +386,32 @@ pub fn prev_locked(case: &Case) -> Amounts {
     }
 }
 
-/// dex_core on the same case: the ledger coordinator's select_parks, then
-/// execute_run, with string ids and keys so ties break the same way.
+/// dex_core on the same case, as the ledger enforces it: parks the run may
+/// not consume (`run_may_consume`: before the deadline, which the ledger's
+/// validation checks) are left out; then the coordinator's select_parks and
+/// execute_run, with string ids and keys so ties break the same way. Returns
+/// every park left out, in time order: past its deadline or beyond the cap.
 pub fn run_core(case: &Case) -> (Result<RunOutput<String, String>, CoreError>, Vec<String>) {
-    let pending: Vec<ParkInput<String, String>> = case
-        .parks
-        .iter()
-        .map(|p| ParkInput {
-            id: park_id(p.id),
-            taker: agent_str(p.taker),
-            amounts: p.amounts.clone(),
-            requested_lots: p.requested_lots,
-            parked_at: p.parked_at,
-        })
-        .collect();
-    let mut sorted = pending.clone();
-    sorted.sort_by(|x, y| (x.parked_at, &x.id).cmp(&(y.parked_at, &y.id)));
-    let deferred = sorted.iter().skip(MAX_PARKS_PER_RUN).map(|p| p.id.clone()).collect();
+    let consumable = |p: &Park| p.deadline.is_some_and(|d| run_may_consume(case.now, d));
+    let input = |p: &Park| ParkInput {
+        id: park_id(p.id),
+        taker: agent_str(p.taker),
+        amounts: p.amounts.clone(),
+        requested_lots: p.requested_lots,
+        parked_at: p.parked_at,
+    };
+    let pending: Vec<ParkInput<String, String>> = case.parks.iter().filter(|p| consumable(p)).map(input).collect();
+    let mut sorted: Vec<&Park> = case.parks.iter().collect();
+    sorted.sort_by(|x, y| (x.parked_at, park_id(x.id)).cmp(&(y.parked_at, park_id(y.id))));
+    let mut taken = 0;
+    let mut deferred = Vec::new();
+    for p in sorted {
+        if consumable(p) && taken < MAX_PARKS_PER_RUN {
+            taken += 1;
+        } else {
+            deferred.push(park_id(p.id));
+        }
+    }
     let result = execute_run(&RunInput {
         terms: case.terms,
         market: MarketDef::default_pair(),
