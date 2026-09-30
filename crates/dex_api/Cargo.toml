@@ -11,3 +11,4 @@ hdi = { workspace = true }
 serde = { workspace = true }
 dex_core = { workspace = true }
 ledger_api = { workspace = true }
+dex_trades = { workspace = true }

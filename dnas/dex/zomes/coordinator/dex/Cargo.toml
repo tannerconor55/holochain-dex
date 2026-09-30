@@ -18,3 +18,4 @@ dex_core = { workspace = true }
 dex_api = { workspace = true }
 ledger_api = { workspace = true }
 dex_integrity = { workspace = true }
+dex_trades = { workspace = true }

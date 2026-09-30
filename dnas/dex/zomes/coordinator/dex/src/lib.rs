@@ -11,7 +11,8 @@
 //! in `dex_core::book`.
 
 use dex_api::{
-    BookView, DexConfig, DexSignal, FillChange, LevelQuery, MakerPresence, MarketAmount, MarketBudgetRequest,
+    BookView, Candle, CandlesRequest, DexConfig, DexSignal, MarketStats, RecentTradesRequest, Trade,
+    MAX_RECENT_TRADES, FillChange, LevelQuery, MakerPresence, MarketAmount, MarketBudgetRequest,
     MarketInfo, MarketOrderRequest, MarketPlan, MarketPreviewRequest, MarketResult, MarketRetry, MyOrder,
     Order, PlaceOrderRequest, PlacedPark, RawListing, RetryMarketRequest, TakePlan, TakeRequest,
     TakeResult, DEFAULT_MAX_SLIPPAGE_BPS,
@@ -300,6 +301,87 @@ fn order_view(state: EscrowState) -> Order {
         expires_at: state.terms.expires_at,
         closed: state.closed,
     }
+}
+
+// ---------------------------------------------------------------------------
+// Trade history and price data
+// ---------------------------------------------------------------------------
+//
+// Derived on every call from the ledger's runs; nothing is stored.
+//
+// Cost: one `get_links` on the market anchor (every order ever listed in the
+// market, closed ones included), then for each order that could have traded
+// in the requested window, `ledger.get_escrow_trades` (one escrow read, one
+// `get_links`, one read per run). O(orders + runs) network reads per call.
+// Orders are pruned by their listing tag's expiry: no run fills after it,
+// so an order expired before the window cannot have traded in it.
+//
+// Where a cache would go: runs are immutable once written, so a closed
+// order's trades never change. A client can keep trades by run hash and
+// only re-read open orders (the UI does this per session). A network-wide
+// index (for example a per-market, per-day link to each run, written by the
+// maker with the run) would bound reads by the window instead of by the
+// market's history, but needs a new link type: an integrity change.
+
+/// The `limit` most recent trades in a market, newest first.
+#[hdk_extern]
+pub fn get_recent_trades(request: RecentTradesRequest) -> ExternResult<Vec<Trade>> {
+    let (id, _) = market(request.market)?;
+    let mut trades = market_trades(&id, None)?;
+    dex_trades::sort_newest_first(&mut trades);
+    trades.truncate(request.limit.min(MAX_RECENT_TRADES) as usize);
+    Ok(trades)
+}
+
+/// Last price and 24-hour stats for a market.
+#[hdk_extern]
+pub fn get_market_stats(market_id: Option<MarketId>) -> ExternResult<MarketStats> {
+    let (id, _) = market(market_id)?;
+    let now = now()?;
+    let since = now.saturating_sub(dex_trades::DAY_US);
+    let recent = market_trades(&id, Some(since))?;
+    // The last price can be older than the window: only then read it all.
+    let trades = if recent.iter().any(|t| t.timestamp > since && t.timestamp <= now) {
+        recent
+    } else {
+        market_trades(&id, None)?
+    };
+    dex_trades::market_stats(&trades, now).map_err(|e| guest(e.to_string()))
+}
+
+/// OHLC candles for a market, oldest first; intervals with no trade have no
+/// candle.
+#[hdk_extern]
+pub fn get_candles(request: CandlesRequest) -> ExternResult<Vec<Candle>> {
+    let (id, _) = market(request.market)?;
+    let trades = market_trades(&id, Some(request.from))?;
+    dex_trades::candles(&trades, request.interval, request.from, request.to).map_err(|e| guest(e.to_string()))
+}
+
+/// Every trade in `market`, skipping orders that expired at or before
+/// `since` (they cannot have traded after it). Orders whose runs cannot be
+/// read yet are left out rather than failing the call.
+fn market_trades(market: &MarketId, since: Option<i64>) -> ExternResult<Vec<Trade>> {
+    let links = get_links(
+        LinkQuery::try_new(market_anchor(market)?, LinkTypes::MarketToOrders)?,
+        GetStrategy::Network,
+    )?;
+    let mut seen = BTreeSet::new();
+    let mut trades = Vec::new();
+    for link in links {
+        let Some(escrow) = link.target.into_action_hash() else { continue };
+        if !seen.insert(escrow.clone()) {
+            continue;
+        }
+        match decode_tag(&link.tag.0) {
+            Some(tag) if &tag.market == market && since.is_none_or(|s| tag.expires_at > s) => {}
+            _ => continue,
+        }
+        if let Ok(order) = ledger::<_, Vec<Trade>>("get_escrow_trades", escrow) {
+            trades.extend(order);
+        }
+    }
+    Ok(trades)
 }
 
 // ---------------------------------------------------------------------------

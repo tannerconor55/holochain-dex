@@ -1539,6 +1539,7 @@ name = "dex_api"
 version = "0.1.0"
 dependencies = [
  "dex_core",
+ "dex_trades",
  "hdi",
  "ledger_api",
  "serde",
@@ -1562,6 +1563,14 @@ dependencies = [
  "ledger_api",
  "serde",
  "tokio",
+]
+
+[[package]]
+name = "dex_trades"
+version = "0.1.0"
+dependencies = [
+ "dex_core",
+ "serde",
 ]
 
 [[package]]

@@ -36,6 +36,9 @@ describe("DexApi", () => {
     await api.runMyOrders();
     await api.reclaimPark(hash(7));
     await api.checkMakers([hash(8)]);
+    await api.recentTrades(null, 20);
+    await api.marketStats(null);
+    await api.candles(null, "M5", 1, 2);
     expect(calls).toEqual([
       { role_name: "dex", zome_name: "ledger", fn_name: "mint", payload: { A: 10_000 } },
       { role_name: "dex", zome_name: "dex", fn_name: "get_order_book", payload: null },
@@ -43,6 +46,9 @@ describe("DexApi", () => {
       { role_name: "dex", zome_name: "dex", fn_name: "run_my_orders", payload: null },
       { role_name: "dex", zome_name: "ledger", fn_name: "reclaim_park", payload: hash(7) },
       { role_name: "dex", zome_name: "dex", fn_name: "check_makers", payload: [hash(8)] },
+      { role_name: "dex", zome_name: "dex", fn_name: "get_recent_trades", payload: { market: null, limit: 20 } },
+      { role_name: "dex", zome_name: "dex", fn_name: "get_market_stats", payload: null },
+      { role_name: "dex", zome_name: "dex", fn_name: "get_candles", payload: { market: null, interval: "M5", from: 1, to: 2 } },
     ]);
   });
 

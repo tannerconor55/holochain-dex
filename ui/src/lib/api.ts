@@ -239,6 +239,47 @@ export interface MarketRetry {
   result: MarketResult | null;
 }
 
+/** dex_trades::Trade: one run's fill at the order's price. */
+export interface Trade {
+  market: MarketId;
+  escrow: ActionHash;
+  run: ActionHash;
+  /** µs since the epoch (the maker's run timestamp). */
+  timestamp: number;
+  price_per_lot: number;
+  lots: number;
+  maker_side: Side;
+  /** lots × price_per_lot, quote minor units. */
+  quote: number;
+}
+
+/** dex_trades::MarketStats: last price ever, the rest over the last 24 h. */
+export interface MarketStats {
+  last_price: number | null;
+  last_trade_at: number | null;
+  open_24h: number | null;
+  change_24h: number | null;
+  high_24h: number | null;
+  low_24h: number | null;
+  volume_lots_24h: number;
+  volume_quote_24h: number;
+  trades_24h: number;
+}
+
+export type CandleInterval = "M1" | "M5" | "M15" | "H1" | "H4" | "D1";
+
+/** dex_trades::Candle. Intervals without a trade have no candle. */
+export interface Candle {
+  start: number;
+  open: number;
+  high: number;
+  low: number;
+  close: number;
+  volume_lots: number;
+  volume_quote: number;
+  trades: number;
+}
+
 /** dex_api::MakerPresence. Advisory: proves nothing about later. */
 export interface MakerPresence {
   order: ActionHash;
@@ -287,6 +328,12 @@ export class DexApi {
   levelOrders = (market: MarketId | null, side: Side, price_per_lot: number) =>
     this.call<Order[]>("dex", "get_level_orders", { market, side, price_per_lot });
   planTake = (request: TakeRequest) => this.call<TakePlan>("dex", "plan_take", request);
+  // dex: trade history and price data (derived from runs on every call)
+  recentTrades = (market: MarketId | null, limit: number) =>
+    this.call<Trade[]>("dex", "get_recent_trades", { market, limit });
+  marketStats = (market: MarketId | null) => this.call<MarketStats>("dex", "get_market_stats", market);
+  candles = (market: MarketId | null, interval: CandleInterval, from: number, to: number) =>
+    this.call<Candle[]>("dex", "get_candles", { market, interval, from, to });
   /** Ping the makers of `orders` (all at once; up to ~60 s if one is offline). */
   checkMakers = (orders: ActionHash[]) => this.call<MakerPresence[]>("dex", "check_makers", orders);
 

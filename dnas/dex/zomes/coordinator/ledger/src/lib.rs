@@ -12,6 +12,7 @@
 //! | `run_escrow`        | maker executes the agreement (a RAVE)                  |
 //! | `collect_all`       | receivers collect allocations                          |
 //! | `reclaim_park`      | taker withdraws a parked spend never consumed          |
+//! | `get_escrow_trades` | an order's trades, derived from its runs (read)        |
 //!
 //! Reads use `GetStrategy::Network` throughout: v1 targets desktop full-arc
 //! nodes only.
@@ -274,6 +275,27 @@ pub fn checkpoint_raw(raw: RawCheckpoint) -> ExternResult<ActionHash> {
 // ---------------------------------------------------------------------------
 // Reads
 // ---------------------------------------------------------------------------
+
+/// An escrow's trades, oldest first: one per `Fill` run that sold lots,
+/// derived by `dex_trades` from the runs (nothing is stored).
+///
+/// Cost: one escrow read, one `get_links`, one read per run.
+#[hdk_extern]
+pub fn get_escrow_trades(escrow: ActionHash) -> ExternResult<Vec<dex_trades::Trade<ActionHash>>> {
+    let (_, entry) = get_escrow(&escrow)?;
+    let props = props()?;
+    let market = market_of(&props, &entry)?;
+    let runs: Vec<dex_trades::RunRecord<ActionHash>> = escrow_runs(&escrow)?
+        .into_iter()
+        .map(|r| dex_trades::RunRecord {
+            run: r.hash,
+            timestamp: r.at.as_micros(),
+            mode: r.run.mode,
+            locked: r.run.locked,
+        })
+        .collect();
+    dex_trades::trades_of_order(&escrow, market, &entry.terms, &runs).map_err(|e| guest(e.to_string()))
+}
 
 /// The caller's checkpoints, oldest first.
 #[hdk_extern]

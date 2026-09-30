@@ -91,6 +91,36 @@ pub struct RawListing {
 }
 
 // ---------------------------------------------------------------------------
+// Trade history and price data (derived from settlement runs; see dex_trades)
+// ---------------------------------------------------------------------------
+
+pub use dex_trades::{Candle, CandleInterval, MarketStats, MAX_CANDLES};
+
+/// One trade as the book reports it.
+pub type Trade = dex_trades::Trade<ActionHash>;
+
+/// Most trades `get_recent_trades` returns.
+pub const MAX_RECENT_TRADES: u32 = 200;
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct RecentTradesRequest {
+    #[serde(default)]
+    pub market: Option<MarketId>,
+    /// At most `MAX_RECENT_TRADES`.
+    pub limit: u32,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct CandlesRequest {
+    #[serde(default)]
+    pub market: Option<MarketId>,
+    pub interval: CandleInterval,
+    /// µs since the epoch; `from` inclusive, `to` exclusive.
+    pub from: i64,
+    pub to: i64,
+}
+
+// ---------------------------------------------------------------------------
 // Maker presence
 // ---------------------------------------------------------------------------
 

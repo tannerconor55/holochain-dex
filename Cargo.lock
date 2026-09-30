@@ -211,6 +211,7 @@ dependencies = [
  "dex_api",
  "dex_core",
  "dex_integrity",
+ "dex_trades",
  "hdk",
  "ledger_api",
  "serde",
@@ -221,6 +222,7 @@ name = "dex_api"
 version = "0.1.0"
 dependencies = [
  "dex_core",
+ "dex_trades",
  "hdi",
  "ledger_api",
  "serde",
@@ -682,6 +684,7 @@ name = "ledger"
 version = "0.1.0"
 dependencies = [
  "dex_core",
+ "dex_trades",
  "hdk",
  "holochain_serialized_bytes",
  "ledger_api",
