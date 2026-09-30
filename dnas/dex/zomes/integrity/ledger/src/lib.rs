@@ -40,7 +40,7 @@ use dex_core::{execute_run, CoreError, ParkInput, RunInput, MAX_MINT, MAX_PARKS_
 use hdi::prelude::*;
 use std::collections::BTreeSet;
 
-pub use dex_core::{Allocation, Amounts, OrderTerms, RunMode, Side, LOT_SIZE_A};
+pub use dex_core::{Allocation, Amounts, MarketDef, OrderTerms, RunMode, Side};
 
 // ---------------------------------------------------------------------------
 // Entry types
@@ -192,14 +192,14 @@ fn validate_mint(mint: &Mint) -> ExternResult<ValidateCallbackResult> {
 }
 
 fn validate_escrow(escrow: &Escrow, action: &CreateAction) -> ExternResult<ValidateCallbackResult> {
-    if let Err(e) = escrow.terms.validate() {
+    if let Err(e) = escrow.terms.validate(&MarketDef::default_pair()) {
         return invalid(e.to_string());
     }
     ensure!(
         escrow.terms.expires_at > action.timestamp().as_micros(),
         "escrow must expire after it is created"
     );
-    let lock = escrow.terms.initial_lock().map_err(core_err)?;
+    let lock = escrow.terms.initial_lock(&MarketDef::default_pair()).map_err(core_err)?;
     validate_debit(action, &lock)
 }
 
@@ -246,7 +246,7 @@ fn validate_run(run: &SettlementRun, action: &CreateAction) -> ExternResult<Vali
     );
     let prev_locked = match latest {
         Some((_, _, prev)) => prev.locked.clone(),
-        None => escrow.terms.initial_lock().map_err(core_err)?,
+        None => escrow.terms.initial_lock(&MarketDef::default_pair()).map_err(core_err)?,
     };
     let already_consumed: BTreeSet<&ActionHash> = earlier_runs
         .iter()
@@ -277,6 +277,7 @@ fn validate_run(run: &SettlementRun, action: &CreateAction) -> ExternResult<Vali
     // Re-execute the settlement logic and require an exact match.
     let input = RunInput {
         terms: escrow.terms,
+        market: MarketDef::default_pair(),
         maker: action.author().clone(),
         prev_locked,
         parks,
@@ -422,7 +423,7 @@ impl ChainLedger {
         }
         let mut debits = Amounts::ZERO;
         for (_, e) in &self.escrows {
-            debits = debits.checked_add(&e.terms.initial_lock()?).ok_or(CoreError::Overflow)?;
+            debits = debits.checked_add(&e.terms.initial_lock(&MarketDef::default_pair())?).ok_or(CoreError::Overflow)?;
         }
         for (_, p) in &self.parks {
             debits = debits.checked_add(&p.amounts).ok_or(CoreError::Overflow)?;

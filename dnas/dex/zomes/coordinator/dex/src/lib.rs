@@ -16,6 +16,8 @@ use dex_api::{
     RawListing, RetryMarketRequest, TakePlan, TakeRequest, TakeResult, DEFAULT_MAX_SLIPPAGE_BPS,
 };
 use dex_core::book;
+// The default market until the DNA properties are wired in (milestone 2 step 2).
+use dex_core::MarketDef;
 use dex_core::listing::{decode_tag, encode_tag};
 use dex_integrity::{market_anchor, LinkTypes};
 use hdk::prelude::*;
@@ -120,7 +122,7 @@ pub fn plan_take(request: TakeRequest) -> ExternResult<TakePlan<ActionHash>> {
 }
 
 fn plan(request: &TakeRequest, orders: &[Order], now: i64) -> ExternResult<TakePlan<ActionHash>> {
-    book::plan_take(orders, &my_key()?, request.take, request.lots, request.limit_price, now)
+    book::plan_take(orders, &MarketDef::default_pair(), &my_key()?, request.take, request.lots, request.limit_price, now)
         .map_err(core_err)
 }
 
@@ -289,6 +291,7 @@ pub fn retry_market_shortfall(request: RetryMarketRequest) -> ExternResult<Marke
     let orders = load_orders(now)?;
     let plan = book::market::plan_with_limit(
         &orders,
+        &MarketDef::default_pair(),
         original.plan.take,
         unfilled,
         original.plan.limit_price,
@@ -319,8 +322,8 @@ fn market_plan(
     let bps = max_slippage_bps.unwrap_or(DEFAULT_MAX_SLIPPAGE_BPS);
     let me = my_key()?;
     match amount {
-        MarketAmount::Lots(lots) => book::plan_market(orders, side, lots, bps, &me, now),
-        MarketAmount::Budget(budget) => book::plan_market_by_budget(orders, side, budget, bps, &me, now),
+        MarketAmount::Lots(lots) => book::plan_market(orders, &MarketDef::default_pair(), side, lots, bps, &me, now),
+        MarketAmount::Budget(budget) => book::plan_market_by_budget(orders, &MarketDef::default_pair(), side, budget, bps, &me, now),
     }
     .map_err(market_err)
 }

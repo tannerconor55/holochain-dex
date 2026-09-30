@@ -13,7 +13,8 @@
 //! All money is integer minor units (`u64`). No floats anywhere.
 //!
 //! * Both assets use 2 decimals: `100` minor units = `1.00`.
-//! * A *lot* is [`LOT_SIZE_A`] minor units of UNIT-A (1.00 A).
+//! * A *lot* is the market's `lot_size` minor units of its base unit (the
+//!   demo market A/HF: 100, so 1.00 A).
 //! * An order's price is `price_per_lot`: HF minor units paid per lot.
 //!   `1.20 HF per A` with a 1.00 A lot is `price_per_lot = 120`.
 //! * Quote for a fill = `lots × price_per_lot`, an exact integer.
@@ -21,11 +22,14 @@
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
-pub mod book;
-pub mod listing;
+pub use markets::{MarketDef, MarketId};
 
-/// Minor units of UNIT-A in one tradable lot (1.00 A).
-pub const LOT_SIZE_A: u64 = 100;
+pub mod book;
+pub mod checkpoint;
+pub mod listing;
+pub mod markets;
+pub mod properties;
+pub mod timeout;
 
 /// Maximum parked taker requests one settlement run may consume.
 ///
@@ -163,67 +167,77 @@ pub struct OrderTerms {
     pub expires_at: i64,
 }
 
+/// Order maths in a market: the market gives the units, the lot size and the
+/// tick size; the terms give the side, price and quantity.
 impl OrderTerms {
-    /// The asset the maker escrows and delivers.
-    pub fn maker_asset(&self) -> &'static str {
+    /// The unit the maker escrows and delivers: base for a sell, quote for a buy.
+    pub fn maker_asset<'m>(&self, market: &'m MarketDef) -> &'m str {
         match self.side {
-            Side::Sell => UNIT_A,
-            Side::Buy => HUB_UNIT,
+            Side::Sell => &market.base,
+            Side::Buy => &market.quote,
         }
     }
 
-    /// The asset takers pay with.
-    pub fn taker_asset(&self) -> &'static str {
+    /// The unit takers pay with.
+    pub fn taker_asset<'m>(&self, market: &'m MarketDef) -> &'m str {
         match self.side {
-            Side::Sell => HUB_UNIT,
-            Side::Buy => UNIT_A,
+            Side::Sell => &market.quote,
+            Side::Buy => &market.base,
         }
     }
 
     /// Maker-asset minor units delivered per lot filled.
-    pub fn maker_units_per_lot(&self) -> u64 {
+    pub fn maker_units_per_lot(&self, market: &MarketDef) -> u64 {
         match self.side {
-            Side::Sell => LOT_SIZE_A,
+            Side::Sell => market.lot_size,
             Side::Buy => self.price_per_lot,
         }
     }
 
     /// Taker-asset minor units paid per lot filled.
-    pub fn taker_units_per_lot(&self) -> u64 {
+    pub fn taker_units_per_lot(&self, market: &MarketDef) -> u64 {
         match self.side {
             Side::Sell => self.price_per_lot,
-            Side::Buy => LOT_SIZE_A,
+            Side::Buy => market.lot_size,
         }
     }
 
-    pub fn validate(&self) -> Result<(), CoreError> {
+    pub fn validate(&self, market: &MarketDef) -> Result<(), CoreError> {
         if self.lots == 0 {
             return Err(CoreError::InvalidTerms("lots must be positive"));
         }
         if self.price_per_lot == 0 {
             return Err(CoreError::InvalidTerms("price_per_lot must be positive"));
         }
-        self.initial_lock()?;
+        if market.lot_size == 0 || market.tick_size == 0 {
+            return Err(CoreError::InvalidTerms("the market's lot and tick sizes must be positive"));
+        }
+        #[allow(clippy::manual_is_multiple_of)] // keep MSRV-friendly for older holonix toolchains
+        if self.price_per_lot % market.tick_size != 0 {
+            return Err(CoreError::InvalidTerms("price_per_lot must be a multiple of the tick size"));
+        }
+        self.initial_lock(market)?;
         Ok(())
     }
 
     /// What the maker must lock when opening the escrow.
-    pub fn initial_lock(&self) -> Result<Amounts, CoreError> {
+    pub fn initial_lock(&self, market: &MarketDef) -> Result<Amounts, CoreError> {
         let amount = self
             .lots
-            .checked_mul(self.maker_units_per_lot())
+            .checked_mul(self.maker_units_per_lot(market))
             .ok_or(CoreError::Overflow)?;
-        Ok(Amounts::of(self.maker_asset(), amount))
+        Ok(Amounts::of(self.maker_asset(market), amount))
     }
 
     /// Lots still fillable, derived from a locked amount. The lock is the only
     /// source of truth for the remaining quantity.
-    pub fn remaining_lots(&self, locked: &Amounts) -> Result<u64, CoreError> {
-        if locked.units().any(|(unit, _)| unit != self.maker_asset()) {
+    pub fn remaining_lots(&self, locked: &Amounts, market: &MarketDef) -> Result<u64, CoreError> {
+        let maker_asset = self.maker_asset(market);
+        if locked.units().any(|(unit, _)| unit != maker_asset) {
             return Err(CoreError::InconsistentLock);
         }
-        let held = locked.get(self.maker_asset());
-        let per_lot = self.maker_units_per_lot();
+        let held = locked.get(maker_asset);
+        let per_lot = self.maker_units_per_lot(market);
         #[allow(clippy::manual_is_multiple_of)] // keep MSRV-friendly for older holonix toolchains
         if held % per_lot != 0 {
             return Err(CoreError::InconsistentLock);
@@ -267,6 +281,8 @@ pub struct ParkInput<P, K> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RunInput<P, K> {
     pub terms: OrderTerms,
+    /// The order's market: its units, lot size and tick size.
+    pub market: MarketDef,
     pub maker: K,
     /// Lock carried from the previous run (or the escrow's initial lock).
     pub prev_locked: Amounts,
@@ -347,7 +363,8 @@ where
     K: Clone + PartialEq,
 {
     let terms = &input.terms;
-    terms.validate()?;
+    let market = &input.market;
+    terms.validate(market)?;
 
     if input.parks.len() > MAX_PARKS_PER_RUN {
         return Err(CoreError::TooManyParks);
@@ -361,12 +378,12 @@ where
     parks.sort_by(|x, y| (x.parked_at, &x.id).cmp(&(y.parked_at, &y.id)));
 
     let fillable = input.mode == RunMode::Fill && !terms.is_expired_at(input.now);
-    let maker_asset = terms.maker_asset();
-    let taker_asset = terms.taker_asset();
-    let maker_per_lot = terms.maker_units_per_lot();
-    let taker_per_lot = terms.taker_units_per_lot();
+    let maker_asset = terms.maker_asset(market);
+    let taker_asset = terms.taker_asset(market);
+    let maker_per_lot = terms.maker_units_per_lot(market);
+    let taker_per_lot = terms.taker_units_per_lot(market);
 
-    let mut remaining = terms.remaining_lots(&input.prev_locked)?;
+    let mut remaining = terms.remaining_lots(&input.prev_locked, market)?;
     let mut allocations: Vec<Allocation<K>> = Vec::new();
     let mut consumed = Vec::with_capacity(parks.len());
     let mut outcomes = Vec::with_capacity(parks.len());

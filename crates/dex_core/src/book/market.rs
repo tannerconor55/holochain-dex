@@ -10,7 +10,7 @@
 //! slippage allowance in basis points. Integer maths only.
 
 use super::{plan_take, side_in_priority, OrderView, TakePlan};
-use crate::{Amounts, Side};
+use crate::{Amounts, MarketDef, Side};
 use serde::{Deserialize, Serialize};
 
 /// Basis points in 100%.
@@ -107,6 +107,7 @@ pub fn market_limit(take: Side, best: u64, max_slippage_bps: u32) -> Result<u64,
 /// Sweep `lots` from the best price, stopping at the slippage limit.
 pub fn plan_market<P: Ord + Clone, K: PartialEq>(
     orders: &[OrderView<P, K>],
+    market: &MarketDef,
     take: Side,
     lots: u64,
     max_slippage_bps: u32,
@@ -118,17 +119,18 @@ pub fn plan_market<P: Ord + Clone, K: PartialEq>(
     }
     let best = best_price(orders, taker, take, now).ok_or(MarketError::EmptyBook)?;
     let limit = market_limit(take, best, max_slippage_bps)?;
-    let mut market = plan_with_limit(orders, take, lots, limit, taker, now)?;
-    market.reference_price = Some(best);
-    market.max_slippage_bps = Some(max_slippage_bps);
-    Ok(market)
+    let mut result = plan_with_limit(orders, market, take, lots, limit, taker, now)?;
+    result.reference_price = Some(best);
+    result.max_slippage_bps = Some(max_slippage_bps);
+    Ok(result)
 }
 
-/// Spend at most `budget_minor` of the taker's paying asset (B for a buy,
-/// A for a sell) on whole lots, from the best price, within the slippage
+/// Spend at most `budget_minor` of the taker's paying unit (quote for a
+/// buy, base for a sell) on whole lots, from the best price, within the slippage
 /// limit. Never exceeds the budget.
 pub fn plan_market_by_budget<P: Ord + Clone, K: PartialEq>(
     orders: &[OrderView<P, K>],
+    market: &MarketDef,
     take: Side,
     budget_minor: u64,
     max_slippage_bps: u32,
@@ -150,7 +152,7 @@ pub fn plan_market_by_budget<P: Ord + Clone, K: PartialEq>(
         if &order.maker == taker {
             continue;
         }
-        let per_lot = order.remaining_terms().taker_units_per_lot();
+        let per_lot = order.remaining_terms().taker_units_per_lot(market);
         let fill = order.remaining_lots.min(left / per_lot);
         if fill == 0 {
             break; // later orders cost at least as much per lot
@@ -161,12 +163,12 @@ pub fn plan_market_by_budget<P: Ord + Clone, K: PartialEq>(
     if lots == 0 {
         return Err(MarketError::NothingToTake);
     }
-    let mut market = plan_with_limit(orders, take, lots, limit, taker, now)?;
-    let spent = pay(take, &market.plan.total_cost);
-    market.reference_price = Some(best);
-    market.max_slippage_bps = Some(max_slippage_bps);
-    market.unspent_budget = Some(budget_minor.checked_sub(spent).ok_or(MarketError::Overflow)?);
-    Ok(market)
+    let mut result = plan_with_limit(orders, market, take, lots, limit, taker, now)?;
+    let spent = pay(take, &result.plan.total_cost, market);
+    result.reference_price = Some(best);
+    result.max_slippage_bps = Some(max_slippage_bps);
+    result.unspent_budget = Some(budget_minor.checked_sub(spent).ok_or(MarketError::Overflow)?);
+    Ok(result)
 }
 
 /// Plan `lots` against a given limit price. Used for retries, which keep the
@@ -174,13 +176,14 @@ pub fn plan_market_by_budget<P: Ord + Clone, K: PartialEq>(
 /// An empty book is not an error here: the plan simply fills nothing.
 pub fn plan_with_limit<P: Ord + Clone, K: PartialEq>(
     orders: &[OrderView<P, K>],
+    market: &MarketDef,
     take: Side,
     lots: u64,
     limit_price: u64,
     taker: &K,
     now: i64,
 ) -> Result<MarketPlan<P>, MarketError> {
-    let plan = plan_take(orders, taker, take, lots, Some(limit_price), now).map_err(|_| MarketError::Overflow)?;
+    let plan = plan_take(orders, market, taker, take, lots, Some(limit_price), now).map_err(|_| MarketError::Overflow)?;
     let mut total_quote_minor: u64 = 0;
     for fill in &plan.fills {
         let quote = fill.lots.checked_mul(fill.price_per_lot).ok_or(MarketError::Overflow)?;
@@ -208,11 +211,11 @@ fn within(take: Side, price: u64, limit: u64) -> bool {
     }
 }
 
-/// The paying asset's amount: HF for a buy, A for a sell.
-fn pay(take: Side, amounts: &Amounts) -> u64 {
+/// The paying unit's amount: quote for a buy, base for a sell.
+fn pay(take: Side, amounts: &Amounts, market: &MarketDef) -> u64 {
     match take {
-        Side::Buy => amounts.get(crate::HUB_UNIT),
-        Side::Sell => amounts.get(crate::UNIT_A),
+        Side::Buy => amounts.get(&market.quote),
+        Side::Sell => amounts.get(&market.base),
     }
 }
 

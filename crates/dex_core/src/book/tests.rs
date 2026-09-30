@@ -87,7 +87,7 @@ fn expired_empty_and_closed_orders_are_not_live() {
 
     assert_eq!(live(&orders, NOW).map(|o| o.id).collect::<Vec<_>>(), vec![4]);
     assert_eq!(aggregate(&orders, NOW).asks, vec![level(120, 7, 1)]);
-    let plan = plan_take(&orders, &BOB, Side::Buy, 50, None, NOW).unwrap();
+    let plan = plan_take(&orders, &MarketDef::default_pair(), &BOB, Side::Buy, 50, None, NOW).unwrap();
     assert_eq!(planned(&plan), vec![(4, 7)]);
 }
 
@@ -115,7 +115,7 @@ fn take_walks_one_level_in_time_priority() {
         ask(1, ALICE, 120, 40, NOW - 30),
         ask(3, CAROL, 120, 25, NOW - 10),
     ];
-    let plan = plan_take(&orders, &DAVE, Side::Buy, 60, None, NOW).unwrap();
+    let plan = plan_take(&orders, &MarketDef::default_pair(), &DAVE, Side::Buy, 60, None, NOW).unwrap();
     assert_eq!(planned(&plan), vec![(1, 40), (2, 20)]);
     assert_eq!(plan.fills[0].cost, Amounts::new(0, 4_800), "40 × 1.20 B");
     assert_eq!(plan.fills[1].cost, Amounts::new(0, 2_400), "20 × 1.20 B");
@@ -131,7 +131,7 @@ fn take_walks_best_price_first_across_levels() {
         ask(2, BOB, 120, 10, NOW - 10),
         ask(3, CAROL, 130, 10, NOW - 40),
     ];
-    let plan = plan_take(&orders, &DAVE, Side::Buy, 25, None, NOW).unwrap();
+    let plan = plan_take(&orders, &MarketDef::default_pair(), &DAVE, Side::Buy, 25, None, NOW).unwrap();
     assert_eq!(planned(&plan), vec![(2, 10), (1, 10), (3, 5)]);
     assert_eq!(plan.total_cost, Amounts::new(0, 1_200 + 1_250 + 650));
 }
@@ -143,11 +143,11 @@ fn take_respects_the_limit_price_and_reports_the_shortfall() {
         ask(2, BOB, 121, 10, NOW),
         ask(3, CAROL, 122, 10, NOW),
     ];
-    let plan = plan_take(&orders, &DAVE, Side::Buy, 25, Some(121), NOW).unwrap();
+    let plan = plan_take(&orders, &MarketDef::default_pair(), &DAVE, Side::Buy, 25, Some(121), NOW).unwrap();
     assert_eq!(planned(&plan), vec![(1, 10), (2, 10)]);
     assert_eq!((plan.filled, plan.shortfall), (20, 5));
 
-    let nothing = plan_take(&orders, &DAVE, Side::Buy, 5, Some(119), NOW).unwrap();
+    let nothing = plan_take(&orders, &MarketDef::default_pair(), &DAVE, Side::Buy, 5, Some(119), NOW).unwrap();
     assert!(nothing.fills.is_empty());
     assert_eq!((nothing.filled, nothing.shortfall), (0, 5));
     assert_eq!(nothing.total_cost, Amounts::ZERO);
@@ -156,7 +156,7 @@ fn take_respects_the_limit_price_and_reports_the_shortfall() {
 #[test]
 fn a_book_too_thin_for_the_request_reports_the_shortfall() {
     let orders = [ask(1, ALICE, 120, 30, NOW)];
-    let plan = plan_take(&orders, &BOB, Side::Buy, 100, None, NOW).unwrap();
+    let plan = plan_take(&orders, &MarketDef::default_pair(), &BOB, Side::Buy, 100, None, NOW).unwrap();
     assert_eq!(planned(&plan), vec![(1, 30)]);
     assert_eq!((plan.filled, plan.shortfall), (30, 70));
 }
@@ -169,7 +169,7 @@ fn taker_sell_consumes_bids_highest_first_and_pays_in_a() {
         bid(3, CAROL, 115, 10, NOW - 20),
         ask(4, CAROL, 100, 50, NOW), // asks are ignored by a sell
     ];
-    let plan = plan_take(&orders, &DAVE, Side::Sell, 25, Some(112), NOW).unwrap();
+    let plan = plan_take(&orders, &MarketDef::default_pair(), &DAVE, Side::Sell, 25, Some(112), NOW).unwrap();
     assert_eq!(planned(&plan), vec![(2, 10), (3, 10)]);
     assert_eq!((plan.filled, plan.shortfall), (20, 5));
     // The taker parks A (one lot = 1.00 A) and receives B at each bid's price.
@@ -182,7 +182,7 @@ fn taker_sell_consumes_bids_highest_first_and_pays_in_a() {
 #[test]
 fn taker_skips_their_own_orders() {
     let orders = [ask(1, BOB, 119, 10, NOW - 30), ask(2, ALICE, 120, 10, NOW - 10)];
-    let plan = plan_take(&orders, &BOB, Side::Buy, 15, None, NOW).unwrap();
+    let plan = plan_take(&orders, &MarketDef::default_pair(), &BOB, Side::Buy, 15, None, NOW).unwrap();
     assert_eq!(planned(&plan), vec![(2, 10)]);
     assert_eq!(plan.shortfall, 5);
     // The book itself still shows them.
@@ -193,7 +193,7 @@ fn taker_skips_their_own_orders() {
 fn plan_costs_match_what_a_settlement_run_charges() {
     // Parking a planned fill's cost must fill exactly the planned lots.
     let orders = [ask(1, ALICE, 120, 100, NOW - 30)];
-    let plan = plan_take(&orders, &BOB, Side::Buy, 40, None, NOW).unwrap();
+    let plan = plan_take(&orders, &MarketDef::default_pair(), &BOB, Side::Buy, 40, None, NOW).unwrap();
     let terms = OrderTerms {
         side: Side::Sell,
         price_per_lot: 120,
@@ -202,8 +202,9 @@ fn plan_costs_match_what_a_settlement_run_charges() {
     };
     let out = crate::execute_run(&crate::RunInput {
         terms,
+        market: MarketDef::default_pair(),
         maker: ALICE,
-        prev_locked: terms.initial_lock().unwrap(),
+        prev_locked: terms.initial_lock(&MarketDef::default_pair()).unwrap(),
         parks: vec![crate::ParkInput {
             id: 7u32,
             taker: BOB,
@@ -258,7 +259,7 @@ fn randomised_plans_never_exceed_the_request_or_any_level() {
         let lots = rng.next(120);
         let limit = if rng.next(2) == 0 { None } else { Some(115 + rng.next(10)) };
 
-        let plan = plan_take(&orders, &taker, take, lots, limit, NOW).unwrap();
+        let plan = plan_take(&orders, &MarketDef::default_pair(), &taker, take, lots, limit, NOW).unwrap();
         assert_eq!(plan.filled + plan.shortfall, lots);
         assert_eq!(plan.fills.iter().map(|f| f.lots).sum::<u64>(), plan.filled);
 

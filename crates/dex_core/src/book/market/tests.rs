@@ -38,16 +38,16 @@ fn fills(m: &MarketPlan<u32>) -> Vec<(u32, u64)> {
 #[test]
 fn an_empty_book_is_an_error_not_a_plan() {
     let none: Vec<View> = vec![];
-    assert_eq!(plan_market(&none, Side::Buy, 10, 200, &DAVE, NOW), Err(MarketError::EmptyBook));
+    assert_eq!(plan_market(&none, &MarketDef::default_pair(), Side::Buy, 10, 200, &DAVE, NOW), Err(MarketError::EmptyBook));
     // Only bids: nothing for a market buy to take.
     let bids = [bid(1, ALICE, 110, 10)];
-    assert_eq!(plan_market(&bids, Side::Buy, 10, 200, &DAVE, NOW), Err(MarketError::EmptyBook));
+    assert_eq!(plan_market(&bids, &MarketDef::default_pair(), Side::Buy, 10, 200, &DAVE, NOW), Err(MarketError::EmptyBook));
     assert_eq!(
-        plan_market_by_budget(&bids, Side::Buy, 10_000, 200, &DAVE, NOW),
+        plan_market_by_budget(&bids, &MarketDef::default_pair(), Side::Buy, 10_000, 200, &DAVE, NOW),
         Err(MarketError::EmptyBook)
     );
     assert_eq!(
-        plan_market(&[ask(1, ALICE, 120, 10)], Side::Buy, 0, 200, &DAVE, NOW),
+        plan_market(&[ask(1, ALICE, 120, 10)], &MarketDef::default_pair(), Side::Buy, 0, 200, &DAVE, NOW),
         Err(MarketError::NothingToTake)
     );
 }
@@ -55,7 +55,7 @@ fn an_empty_book_is_an_error_not_a_plan() {
 #[test]
 fn one_level_fills_at_that_price() {
     let orders = [ask(1, ALICE, 120, 100)];
-    let m = plan_market(&orders, Side::Buy, 40, 200, &BOB, NOW).unwrap();
+    let m = plan_market(&orders, &MarketDef::default_pair(), Side::Buy, 40, 200, &BOB, NOW).unwrap();
     assert_eq!(fills(&m), vec![(1, 40)]);
     assert_eq!(m.plan.total_cost, Amounts::new(0, 4_800));
     assert_eq!((m.total_quote_minor, m.total_lots), (4_800, 40), "average 1.20");
@@ -68,7 +68,7 @@ fn one_level_fills_at_that_price() {
 #[test]
 fn a_sweep_crosses_levels_best_first() {
     let orders = [ask(1, ALICE, 121, 10), ask(2, BOB, 120, 10), ask(3, CAROL, 122, 10)];
-    let m = plan_market(&orders, Side::Buy, 25, 200, &DAVE, NOW).unwrap();
+    let m = plan_market(&orders, &MarketDef::default_pair(), Side::Buy, 25, 200, &DAVE, NOW).unwrap();
     assert_eq!(fills(&m), vec![(2, 10), (1, 10), (3, 5)]);
     assert_eq!(m.total_quote_minor, 1_200 + 1_210 + 610);
     assert_eq!(m.total_lots, 25);
@@ -80,12 +80,12 @@ fn a_sweep_crosses_levels_best_first() {
 fn the_slippage_limit_stops_the_sweep() {
     // Best 1.00, 2% → limit 1.02: the 1.03 level is out of reach.
     let orders = [ask(1, ALICE, 100, 10), ask(2, BOB, 102, 10), ask(3, CAROL, 103, 50)];
-    let m = plan_market(&orders, Side::Buy, 40, 200, &DAVE, NOW).unwrap();
+    let m = plan_market(&orders, &MarketDef::default_pair(), Side::Buy, 40, 200, &DAVE, NOW).unwrap();
     assert_eq!(m.limit_price, 102);
     assert_eq!(fills(&m), vec![(1, 10), (2, 10)]);
     assert_eq!((m.plan.filled, m.plan.shortfall), (20, 20));
     // A wider allowance reaches it.
-    let wide = plan_market(&orders, Side::Buy, 40, 300, &DAVE, NOW).unwrap();
+    let wide = plan_market(&orders, &MarketDef::default_pair(), Side::Buy, 40, 300, &DAVE, NOW).unwrap();
     assert_eq!(fills(&wide), vec![(1, 10), (2, 10), (3, 20)]);
 }
 
@@ -111,17 +111,17 @@ fn limit_rounding_at_the_boundary_for_both_sides() {
 
     // A level exactly on the limit is taken; one minor unit past it is not.
     let buy_book = [ask(1, ALICE, 120, 1), ask(2, BOB, 123, 1), ask(3, CAROL, 124, 1)];
-    let m = plan_market(&buy_book, Side::Buy, 3, 200, &DAVE, NOW).unwrap();
+    let m = plan_market(&buy_book, &MarketDef::default_pair(), Side::Buy, 3, 200, &DAVE, NOW).unwrap();
     assert_eq!(fills(&m), vec![(1, 1), (2, 1)]);
     let sell_book = [bid(1, ALICE, 120, 1), bid(2, BOB, 117, 1), bid(3, CAROL, 116, 1)];
-    let m = plan_market(&sell_book, Side::Sell, 3, 200, &DAVE, NOW).unwrap();
+    let m = plan_market(&sell_book, &MarketDef::default_pair(), Side::Sell, 3, 200, &DAVE, NOW).unwrap();
     assert_eq!(fills(&m), vec![(1, 1), (2, 1)]);
 }
 
 #[test]
 fn a_market_sell_sweeps_bids_highest_first() {
     let orders = [bid(1, ALICE, 118, 10), bid(2, BOB, 120, 10), bid(3, CAROL, 110, 10)];
-    let m = plan_market(&orders, Side::Sell, 15, 200, &DAVE, NOW).unwrap();
+    let m = plan_market(&orders, &MarketDef::default_pair(), Side::Sell, 15, 200, &DAVE, NOW).unwrap();
     assert_eq!(m.limit_price, 117);
     assert_eq!(fills(&m), vec![(2, 10), (1, 5)]);
     assert_eq!(m.plan.total_cost, Amounts::new(1_500, 0), "the taker pays in A");
@@ -134,13 +134,13 @@ fn a_market_sell_sweeps_bids_highest_first() {
 fn the_taker_skips_their_own_orders_including_for_the_reference_price() {
     // Dave's own 1.00 ask must not set the reference price.
     let orders = [ask(1, DAVE, 100, 50), ask(2, ALICE, 120, 10), ask(3, BOB, 122, 10)];
-    let m = plan_market(&orders, Side::Buy, 15, 200, &DAVE, NOW).unwrap();
+    let m = plan_market(&orders, &MarketDef::default_pair(), Side::Buy, 15, 200, &DAVE, NOW).unwrap();
     assert_eq!(m.reference_price, Some(120));
     assert_eq!(m.limit_price, 123);
     assert_eq!(fills(&m), vec![(2, 10), (3, 5)]);
     // A book of only the taker's own orders is empty to them.
     assert_eq!(
-        plan_market(&[ask(1, DAVE, 100, 5)], Side::Buy, 1, 200, &DAVE, NOW),
+        plan_market(&[ask(1, DAVE, 100, 5)], &MarketDef::default_pair(), Side::Buy, 1, 200, &DAVE, NOW),
         Err(MarketError::EmptyBook)
     );
 }
@@ -152,7 +152,7 @@ fn expired_and_closed_orders_are_skipped() {
     let mut closed = ask(2, BOB, 100, 10);
     closed.closed = true;
     let orders = [expired, closed, ask(3, CAROL, 120, 10)];
-    let m = plan_market(&orders, Side::Buy, 5, 200, &DAVE, NOW).unwrap();
+    let m = plan_market(&orders, &MarketDef::default_pair(), Side::Buy, 5, 200, &DAVE, NOW).unwrap();
     assert_eq!(m.reference_price, Some(120), "dead orders do not set the reference price");
     assert_eq!(fills(&m), vec![(3, 5)]);
 }
@@ -161,22 +161,22 @@ fn expired_and_closed_orders_are_skipped() {
 fn a_budget_buys_whole_lots_and_is_never_exceeded() {
     let orders = [ask(1, ALICE, 120, 10), ask(2, BOB, 121, 10)];
     // 20.00 B: 10 lots at 1.20 (12.00 B), then 6 at 1.21 (7.26 B) = 19.26 B.
-    let m = plan_market_by_budget(&orders, Side::Buy, 2_000, 200, &DAVE, NOW).unwrap();
+    let m = plan_market_by_budget(&orders, &MarketDef::default_pair(), Side::Buy, 2_000, 200, &DAVE, NOW).unwrap();
     assert_eq!(fills(&m), vec![(1, 10), (2, 6)]);
     assert_eq!(m.plan.total_cost, Amounts::new(0, 1_926));
     assert_eq!(m.unspent_budget, Some(74));
     // Exactly enough for one lot.
-    let one = plan_market_by_budget(&orders, Side::Buy, 120, 200, &DAVE, NOW).unwrap();
+    let one = plan_market_by_budget(&orders, &MarketDef::default_pair(), Side::Buy, 120, 200, &DAVE, NOW).unwrap();
     assert_eq!(fills(&one), vec![(1, 1)]);
     assert_eq!(one.unspent_budget, Some(0));
     // Less than one lot.
     assert_eq!(
-        plan_market_by_budget(&orders, Side::Buy, 119, 200, &DAVE, NOW),
+        plan_market_by_budget(&orders, &MarketDef::default_pair(), Side::Buy, 119, 200, &DAVE, NOW),
         Err(MarketError::NothingToTake)
     );
     // Selling by budget spends A, 1.00 A per lot.
     let bids = [bid(1, ALICE, 120, 10)];
-    let s = plan_market_by_budget(&bids, Side::Sell, 350, 200, &DAVE, NOW).unwrap();
+    let s = plan_market_by_budget(&bids, &MarketDef::default_pair(), Side::Sell, 350, 200, &DAVE, NOW).unwrap();
     assert_eq!(fills(&s), vec![(1, 3)]);
     assert_eq!(s.unspent_budget, Some(50));
 }
@@ -184,7 +184,7 @@ fn a_budget_buys_whole_lots_and_is_never_exceeded() {
 #[test]
 fn a_budget_stops_at_the_slippage_limit_too() {
     let orders = [ask(1, ALICE, 100, 5), ask(2, BOB, 110, 100)];
-    let m = plan_market_by_budget(&orders, Side::Buy, 100_000, 200, &DAVE, NOW).unwrap();
+    let m = plan_market_by_budget(&orders, &MarketDef::default_pair(), Side::Buy, 100_000, 200, &DAVE, NOW).unwrap();
     assert_eq!(fills(&m), vec![(1, 5)]);
     assert_eq!(m.unspent_budget, Some(100_000 - 500));
 }
@@ -194,11 +194,11 @@ fn a_retry_keeps_the_given_limit_and_tolerates_an_empty_book() {
     let orders = [ask(1, ALICE, 125, 10), ask(2, BOB, 123, 10)];
     // The original limit was 1.23: the new 1.25 level stays out of reach even
     // though a fresh 2% from the new best price (1.23) would allow it.
-    let m = plan_with_limit(&orders, Side::Buy, 15, 123, &DAVE, NOW).unwrap();
+    let m = plan_with_limit(&orders, &MarketDef::default_pair(), Side::Buy, 15, 123, &DAVE, NOW).unwrap();
     assert_eq!(fills(&m), vec![(2, 10)]);
     assert_eq!((m.plan.shortfall, m.max_slippage_bps), (5, None));
     let none: Vec<View> = vec![];
-    let empty = plan_with_limit(&none, Side::Buy, 5, 123, &DAVE, NOW).unwrap();
+    let empty = plan_with_limit(&none, &MarketDef::default_pair(), Side::Buy, 5, 123, &DAVE, NOW).unwrap();
     assert_eq!((empty.plan.filled, empty.plan.shortfall, empty.reference_price), (0, 5, None));
 }
 
@@ -237,9 +237,9 @@ fn randomised_costs_match_lots_times_price_and_respect_budget_and_limit() {
         let lots = 1 + rng.next(80);
 
         let result = if by_budget {
-            plan_market_by_budget(&orders, take, budget, bps, &taker, NOW)
+            plan_market_by_budget(&orders, &MarketDef::default_pair(), take, budget, bps, &taker, NOW)
         } else {
-            plan_market(&orders, take, lots, bps, &taker, NOW)
+            plan_market(&orders, &MarketDef::default_pair(), take, lots, bps, &taker, NOW)
         };
         let Ok(m) = result else { continue };
         planned += 1;
@@ -254,14 +254,14 @@ fn randomised_costs_match_lots_times_price_and_respect_budget_and_limit() {
             assert!(o.is_live(NOW) && o.maker != taker && f.lots > 0 && f.lots <= o.remaining_lots);
             assert_eq!(f.price_per_lot, o.price_per_lot, "each maker's own price");
             assert!(within(take, f.price_per_lot, m.limit_price), "never past the limit");
-            assert_eq!(pay(take, &f.cost), f.lots * per_lot_paid(f.price_per_lot));
+            assert_eq!(pay(take, &f.cost, &MarketDef::default_pair()), f.lots * per_lot_paid(f.price_per_lot));
             quote += f.lots * f.price_per_lot;
         }
         assert_eq!(m.total_quote_minor, quote);
         assert_eq!(m.total_lots, m.plan.filled);
-        assert_eq!(pay(take, &m.plan.total_cost), m.plan.fills.iter().map(|f| pay(take, &f.cost)).sum::<u64>());
+        assert_eq!(pay(take, &m.plan.total_cost, &MarketDef::default_pair()), m.plan.fills.iter().map(|f| pay(take, &f.cost, &MarketDef::default_pair())).sum::<u64>());
         if by_budget {
-            let spent = pay(take, &m.plan.total_cost);
+            let spent = pay(take, &m.plan.total_cost, &MarketDef::default_pair());
             assert!(spent <= budget, "budget {budget} exceeded: {spent}");
             assert_eq!(m.unspent_budget, Some(budget - spent));
         } else {

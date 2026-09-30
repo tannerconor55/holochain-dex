@@ -3,7 +3,7 @@
 //! the lock is the full initial lock, also as the opening run (maker spend).
 
 use crate::engine::*;
-use dex_core::{Amounts, OrderTerms, RunMode, Side, MAX_PARKS_PER_RUN};
+use dex_core::{Amounts, MarketDef, OrderTerms, RunMode, Side, MAX_PARKS_PER_RUN};
 
 const NOW: i64 = 1_000_000;
 const LATER: i64 = 2_000_000;
@@ -20,7 +20,7 @@ fn case(terms: OrderTerms, lock: Amounts, parks: Vec<Park>, mode: RunMode) -> Ca
 /// opening run too. Returns the later run's result.
 fn both(c: Case) -> RhaiRun {
     let lock = prev_locked(&c);
-    if Ok(lock) == c.terms.initial_lock() {
+    if Ok(lock) == c.terms.initial_lock(&MarketDef::default_pair()) {
         assert_parity(&Case { start: Start::Opening, ..c.clone() }).expect("opening run succeeds");
     }
     assert_parity(&c).expect("run succeeds")
@@ -62,7 +62,7 @@ fn mvp_success_scenario_chained_through_the_engine() {
 #[test]
 fn buy_order_is_symmetric() {
     let terms = OrderTerms { side: Side::Buy, ..alice_sell_100() };
-    let lock = terms.initial_lock().unwrap();
+    let lock = terms.initial_lock(&MarketDef::default_pair()).unwrap();
     let r = both(case(terms, lock, vec![park(1, CAROL, Amounts::new(4_000, 0), 40, NOW)], RunMode::Fill));
     assert_eq!(paid_to(&r, CAROL), Amounts::new(0, 4_800), "seller gets 48 B");
     assert_eq!(paid_to(&r, ALICE), Amounts::new(4_000, 0), "buyer gets 40 A");
@@ -74,7 +74,7 @@ fn two_takers_cannot_both_consume_the_same_escrow() {
     let terms = alice_sell_100();
     let r = both(case(
         terms,
-        terms.initial_lock().unwrap(),
+        terms.initial_lock(&MarketDef::default_pair()).unwrap(),
         vec![
             park(2, CAROL, Amounts::new(0, 12_000), 100, NOW - 5),
             park(1, BOB, Amounts::new(0, 12_000), 100, NOW - 9),
@@ -92,7 +92,7 @@ fn time_priority_partially_fills_the_later_taker() {
     let terms = alice_sell_100();
     let r = both(case(
         terms,
-        terms.initial_lock().unwrap(),
+        terms.initial_lock(&MarketDef::default_pair()).unwrap(),
         vec![
             park(1, BOB, Amounts::new(0, 8_400), 70, NOW - 9),
             park(2, CAROL, Amounts::new(0, 6_000), 50, NOW - 5),
@@ -125,7 +125,7 @@ fn equal_timestamps_break_ties_by_source_hash() {
 #[test]
 fn overpayment_is_refunded() {
     let terms = alice_sell_100();
-    let r = both(case(terms, terms.initial_lock().unwrap(), vec![park(1, BOB, Amounts::new(0, 5_000), 40, NOW)], RunMode::Fill));
+    let r = both(case(terms, terms.initial_lock(&MarketDef::default_pair()).unwrap(), vec![park(1, BOB, Amounts::new(0, 5_000), 40, NOW)], RunMode::Fill));
     assert_eq!(paid_to(&r, BOB), Amounts::new(4_000, 200), "40 A plus 2.00 B change");
     assert_eq!(paid_to(&r, ALICE), Amounts::new(0, 4_800));
 }
@@ -133,7 +133,7 @@ fn overpayment_is_refunded() {
 #[test]
 fn underpayment_fills_only_what_is_covered() {
     let terms = alice_sell_100();
-    let r = both(case(terms, terms.initial_lock().unwrap(), vec![park(1, BOB, Amounts::new(0, 4_000), 40, NOW)], RunMode::Fill));
+    let r = both(case(terms, terms.initial_lock(&MarketDef::default_pair()).unwrap(), vec![park(1, BOB, Amounts::new(0, 4_000), 40, NOW)], RunMode::Fill));
     assert_eq!(r.outcomes[0].1, 33);
     assert_eq!(paid_to(&r, BOB), Amounts::new(3_300, 40));
     assert_eq!(r.locked, Amounts::new(6_700, 0));
@@ -142,16 +142,16 @@ fn underpayment_fills_only_what_is_covered() {
 #[test]
 fn wrong_asset_is_refunded_in_full() {
     let terms = alice_sell_100();
-    let r = both(case(terms, terms.initial_lock().unwrap(), vec![park(1, BOB, Amounts::new(500, 0), 5, NOW)], RunMode::Fill));
+    let r = both(case(terms, terms.initial_lock(&MarketDef::default_pair()).unwrap(), vec![park(1, BOB, Amounts::new(500, 0), 5, NOW)], RunMode::Fill));
     assert_eq!(paid_to(&r, BOB), Amounts::new(500, 0));
     assert_eq!(paid_to(&r, ALICE), Amounts::ZERO);
-    assert_eq!(r.locked, terms.initial_lock().unwrap());
+    assert_eq!(r.locked, terms.initial_lock(&MarketDef::default_pair()).unwrap());
 }
 
 #[test]
 fn expired_order_refunds_takers_and_keeps_lock_until_release() {
     let terms = OrderTerms { expires_at: NOW, ..alice_sell_100() };
-    let lock = terms.initial_lock().unwrap();
+    let lock = terms.initial_lock(&MarketDef::default_pair()).unwrap();
     let r = both(case(terms, lock.clone(), vec![park(1, BOB, Amounts::new(0, 4_800), 40, NOW - 1)], RunMode::Fill));
     assert_eq!(paid_to(&r, BOB), Amounts::new(0, 4_800), "no fill at or after expiry");
     assert_eq!(r.locked, lock);
@@ -177,7 +177,7 @@ fn runs_after_close_only_refund() {
 #[test]
 fn self_trade_nets_into_one_allocation() {
     let terms = alice_sell_100();
-    let r = both(case(terms, terms.initial_lock().unwrap(), vec![park(1, ALICE, Amounts::new(0, 1_200), 10, NOW)], RunMode::Fill));
+    let r = both(case(terms, terms.initial_lock(&MarketDef::default_pair()).unwrap(), vec![park(1, ALICE, Amounts::new(0, 1_200), 10, NOW)], RunMode::Fill));
     assert_eq!(r.paid.len(), 1);
     assert_eq!(paid_to(&r, ALICE), Amounts::new(1_000, 1_200));
 }
@@ -192,7 +192,7 @@ fn input_order_does_not_change_the_result() {
     ];
     let mut reversed = parks.clone();
     reversed.reverse();
-    let lock = terms.initial_lock().unwrap();
+    let lock = terms.initial_lock(&MarketDef::default_pair()).unwrap();
     let forward = both(case(terms, lock.clone(), parks, RunMode::Fill));
     let backward = both(case(terms, lock, reversed, RunMode::Fill));
     assert_eq!(forward.paid, backward.paid);
@@ -206,7 +206,7 @@ fn parks_beyond_the_cap_wait_for_the_next_run() {
     let parks: Vec<Park> = (0..=MAX_PARKS_PER_RUN as u32)
         .map(|i| park(i, BOB, Amounts::new(0, 120), 1, NOW - 100 + i64::from(i)))
         .collect();
-    let first = both(case(terms, terms.initial_lock().unwrap(), parks.clone(), RunMode::Fill));
+    let first = both(case(terms, terms.initial_lock(&MarketDef::default_pair()).unwrap(), parks.clone(), RunMode::Fill));
     assert_eq!(first.consumed.len(), MAX_PARKS_PER_RUN);
     assert_eq!(first.rejected, vec![park_id(MAX_PARKS_PER_RUN as u32)], "the newest waits");
 
@@ -227,7 +227,7 @@ fn parks_beyond_the_cap_wait_for_the_next_run() {
 fn a_park_listed_twice_is_refused_by_both() {
     let terms = alice_sell_100();
     let p = park(1, BOB, Amounts::new(0, 120), 1, NOW);
-    let c = case(terms, terms.initial_lock().unwrap(), vec![p.clone(), p], RunMode::Fill);
+    let c = case(terms, terms.initial_lock(&MarketDef::default_pair()).unwrap(), vec![p.clone(), p], RunMode::Fill);
     assert!(run_rhai(&c).is_err());
     assert!(assert_parity(&c).is_none(), "both refuse");
 }
@@ -287,5 +287,5 @@ fn the_opening_run_names_the_maker_spend_in_a_name_only_allocation() {
     assert_eq!(allocations.len(), 1);
     assert_eq!(allocations[0].receiver.to_string(), agent_str(ALICE));
     assert!(serde_json::to_value(&allocations[0].amounts).unwrap().as_object().unwrap().is_empty(), "amounts {{}}");
-    assert_eq!(r.locked, terms.initial_lock().unwrap());
+    assert_eq!(r.locked, terms.initial_lock(&MarketDef::default_pair()).unwrap());
 }

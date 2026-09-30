@@ -11,7 +11,7 @@
 //! Priority is price first, then `(opened_at, id)` ascending: the same
 //! tiebreak [`crate::execute_run`] uses for parks.
 
-use crate::{Amounts, CoreError, OrderTerms, Side};
+use crate::{Amounts, CoreError, MarketDef, OrderTerms, Side};
 use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
 
@@ -178,6 +178,7 @@ pub struct TakePlan<P> {
 /// maker's run then refunds whatever it cannot fill.
 pub fn plan_take<P: Ord + Clone, K: PartialEq>(
     orders: &[OrderView<P, K>],
+    market: &MarketDef,
     taker: &K,
     take: Side,
     lots: u64,
@@ -212,12 +213,12 @@ pub fn plan_take<P: Ord + Clone, K: PartialEq>(
         let fill = plan.shortfall.min(order.remaining_lots);
         let terms = order.remaining_terms();
         let cost = Amounts::of(
-            terms.taker_asset(),
-            fill.checked_mul(terms.taker_units_per_lot()).ok_or(CoreError::Overflow)?,
+            terms.taker_asset(market),
+            fill.checked_mul(terms.taker_units_per_lot(market)).ok_or(CoreError::Overflow)?,
         );
         let receives = Amounts::of(
-            terms.maker_asset(),
-            fill.checked_mul(terms.maker_units_per_lot()).ok_or(CoreError::Overflow)?,
+            terms.maker_asset(market),
+            fill.checked_mul(terms.maker_units_per_lot(market)).ok_or(CoreError::Overflow)?,
         );
         plan.total_cost = plan.total_cost.checked_add(&cost).ok_or(CoreError::Overflow)?;
         plan.total_receives = plan.total_receives.checked_add(&receives).ok_or(CoreError::Overflow)?;

@@ -25,7 +25,7 @@ mod entries {
     /// silently break zomes that check it.
     pub const ESCROW_ENTRY_INDEX: u8 = 1;
 
-    /// An order's escrow. Creating it locks `terms.initial_lock()` from the maker.
+    /// An order's escrow. Creating it locks `terms.initial_lock(market)` from the maker.
     /// The action hash of this entry is the order's identity.
     #[hdk_entry_helper]
     #[derive(Clone, PartialEq)]

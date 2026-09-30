@@ -1,6 +1,6 @@
 //! Running one settlement run both ways, and comparing them.
 
-use dex_core::{execute_run, select_parks, Amounts, CoreError, OrderTerms, ParkInput, RunInput, RunMode, RunOutput, Side, LOT_SIZE_A, MAX_PARKS_PER_RUN};
+use dex_core::{execute_run, select_parks, Amounts, CoreError, OrderTerms, ParkInput, RunInput, RunMode, RunOutput, Side, MarketDef, MAX_PARKS_PER_RUN};
 use hdi::prelude::*;
 use hdk::hdk::set_hdk;
 use hdk::prelude::MockHdkT;
@@ -245,7 +245,7 @@ pub fn input_json(case: &Case) -> Value {
     let t = &case.terms;
     let mut consumed = RAVEInputHandler::new();
     if let Start::Opening = case.start {
-        let lock = t.initial_lock().expect("valid terms");
+        let lock = t.initial_lock(&MarketDef::default_pair()).expect("valid terms");
         let id = maker_spend_id();
         consumed.insert(
             "maker_spender_allocations".into(),
@@ -280,7 +280,7 @@ pub fn input_json(case: &Case) -> Value {
     inputs.insert("price_per_lot".into(), single(json!(t.price_per_lot)));
     inputs.insert("lots".into(), single(json!(t.lots)));
     inputs.insert("expires_at".into(), single(json!(t.expires_at)));
-    inputs.insert("lot_size".into(), single(json!(LOT_SIZE_A)));
+    inputs.insert("lot_size".into(), single(json!(MarketDef::default_pair().lot_size)));
     inputs.insert("unit_a".into(), single(json!(UNIT_A)));
     inputs.insert("unit_b".into(), single(json!(UNIT_B)));
     inputs.insert("max_parks_per_run".into(), single(json!(MAX_PARKS_PER_RUN)));
@@ -355,7 +355,7 @@ pub fn run_rhai(case: &Case) -> Result<RhaiRun, String> {
 
 pub fn prev_locked(case: &Case) -> Amounts {
     match &case.start {
-        Start::Opening => case.terms.initial_lock().expect("valid terms"),
+        Start::Opening => case.terms.initial_lock(&MarketDef::default_pair()).expect("valid terms"),
         Start::Locked(lock) => lock.clone(),
         Start::Chained(output) => output.locked.as_ref().map(amounts_of).unwrap_or(Amounts::ZERO),
     }
@@ -380,6 +380,7 @@ pub fn run_core(case: &Case) -> (Result<RunOutput<String, String>, CoreError>, V
     let deferred = sorted.iter().skip(MAX_PARKS_PER_RUN).map(|p| p.id.clone()).collect();
     let result = execute_run(&RunInput {
         terms: case.terms,
+        market: MarketDef::default_pair(),
         maker: agent_str(ALICE),
         prev_locked: prev_locked(case),
         parks: select_parks(pending),

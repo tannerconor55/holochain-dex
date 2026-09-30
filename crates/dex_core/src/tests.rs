@@ -34,6 +34,7 @@ fn run(
 ) -> RunOutput<u32, &'static str> {
     execute_run(&RunInput {
         terms,
+        market: MarketDef::default_pair(),
         maker: ALICE,
         prev_locked,
         parks,
@@ -54,7 +55,7 @@ fn paid_to(out: &RunOutput<u32, &'static str>, who: &str) -> Amounts {
 #[test]
 fn mvp_success_scenario() {
     let terms = alice_sell_100();
-    let lock = terms.initial_lock().unwrap();
+    let lock = terms.initial_lock(&MarketDef::default_pair()).unwrap();
     assert_eq!(lock, Amounts::new(10_000, 0), "100.00 A escrowed");
 
     // Bob parks 48.00 B for 40 A.
@@ -67,7 +68,7 @@ fn mvp_success_scenario() {
     assert_eq!(paid_to(&fill, BOB), Amounts::new(4_000, 0), "Bob receives 40 A");
     assert_eq!(paid_to(&fill, ALICE), Amounts::new(0, 4_800), "Alice receives 48 B");
     assert_eq!(fill.locked, Amounts::new(6_000, 0), "60 A stays locked");
-    assert_eq!(terms.remaining_lots(&fill.locked).unwrap(), 60);
+    assert_eq!(terms.remaining_lots(&fill.locked, &MarketDef::default_pair()).unwrap(), 60);
 
     // Alice cancels: the remaining 60 A comes back.
     let release = run(terms, fill.locked, vec![], RunMode::Release);
@@ -82,7 +83,7 @@ fn buy_order_is_symmetric() {
         side: Side::Buy,
         ..alice_sell_100()
     };
-    let lock = terms.initial_lock().unwrap();
+    let lock = terms.initial_lock(&MarketDef::default_pair()).unwrap();
     assert_eq!(lock, Amounts::new(0, 12_000), "120.00 B escrowed");
 
     let out = run(
@@ -99,7 +100,7 @@ fn buy_order_is_symmetric() {
 #[test]
 fn two_takers_cannot_both_consume_the_same_escrow() {
     let terms = alice_sell_100();
-    let lock = terms.initial_lock().unwrap();
+    let lock = terms.initial_lock(&MarketDef::default_pair()).unwrap();
     // Both want all 100 A; Bob parked first.
     let out = run(
         terms,
@@ -119,7 +120,7 @@ fn two_takers_cannot_both_consume_the_same_escrow() {
 #[test]
 fn time_priority_partially_fills_the_later_taker() {
     let terms = alice_sell_100();
-    let lock = terms.initial_lock().unwrap();
+    let lock = terms.initial_lock(&MarketDef::default_pair()).unwrap();
     let out = run(
         terms,
         lock,
@@ -157,7 +158,7 @@ fn overpayment_is_refunded() {
     let terms = alice_sell_100();
     let out = run(
         terms,
-        terms.initial_lock().unwrap(),
+        terms.initial_lock(&MarketDef::default_pair()).unwrap(),
         vec![park(1, BOB, Amounts::new(0, 5_000), 40, NOW)],
         RunMode::Fill,
     );
@@ -171,7 +172,7 @@ fn underpayment_fills_only_what_is_covered() {
     // 40.00 B covers 33 lots at 1.20 (39.60 B); 0.40 B refunded.
     let out = run(
         terms,
-        terms.initial_lock().unwrap(),
+        terms.initial_lock(&MarketDef::default_pair()).unwrap(),
         vec![park(1, BOB, Amounts::new(0, 4_000), 40, NOW)],
         RunMode::Fill,
     );
@@ -185,13 +186,13 @@ fn wrong_asset_is_refunded_in_full() {
     let terms = alice_sell_100();
     let out = run(
         terms,
-        terms.initial_lock().unwrap(),
+        terms.initial_lock(&MarketDef::default_pair()).unwrap(),
         vec![park(1, BOB, Amounts::new(500, 0), 5, NOW)],
         RunMode::Fill,
     );
     assert_eq!(paid_to(&out, BOB), Amounts::new(500, 0));
     assert_eq!(paid_to(&out, ALICE), Amounts::ZERO);
-    assert_eq!(out.locked, terms.initial_lock().unwrap());
+    assert_eq!(out.locked, terms.initial_lock(&MarketDef::default_pair()).unwrap());
 }
 
 #[test]
@@ -200,7 +201,7 @@ fn expired_order_refunds_takers_and_keeps_lock_until_release() {
         expires_at: NOW,
         ..alice_sell_100()
     };
-    let lock = terms.initial_lock().unwrap();
+    let lock = terms.initial_lock(&MarketDef::default_pair()).unwrap();
     let out = run(
         terms,
         lock.clone(),
@@ -246,7 +247,7 @@ fn self_trade_nets_into_one_allocation() {
     let terms = alice_sell_100();
     let out = run(
         terms,
-        terms.initial_lock().unwrap(),
+        terms.initial_lock(&MarketDef::default_pair()).unwrap(),
         vec![park(1, ALICE, Amounts::new(0, 1_200), 10, NOW)],
         RunMode::Fill,
     );
@@ -264,7 +265,7 @@ fn park_order_does_not_change_the_result() {
     ];
     let mut reversed = parks.clone();
     reversed.reverse();
-    let lock = terms.initial_lock().unwrap();
+    let lock = terms.initial_lock(&MarketDef::default_pair()).unwrap();
     assert_eq!(
         run(terms, lock.clone(), parks, RunMode::Fill),
         run(terms, lock, reversed, RunMode::Fill)
@@ -279,8 +280,9 @@ fn rejects_more_parks_than_the_cap() {
         .collect();
     let err = execute_run(&RunInput {
         terms,
+        market: MarketDef::default_pair(),
         maker: ALICE,
-        prev_locked: terms.initial_lock().unwrap(),
+        prev_locked: terms.initial_lock(&MarketDef::default_pair()).unwrap(),
         parks,
         now: NOW,
         mode: RunMode::Fill,
@@ -295,8 +297,9 @@ fn rejects_duplicate_parks() {
     let p = park(1, BOB, Amounts::new(0, 120), 1, NOW);
     let err = execute_run(&RunInput {
         terms,
+        market: MarketDef::default_pair(),
         maker: ALICE,
-        prev_locked: terms.initial_lock().unwrap(),
+        prev_locked: terms.initial_lock(&MarketDef::default_pair()).unwrap(),
         parks: vec![p.clone(), p],
         now: NOW,
         mode: RunMode::Fill,
@@ -310,6 +313,7 @@ fn rejects_a_lock_that_is_not_whole_lots() {
     let terms = alice_sell_100();
     let err = execute_run::<u32, &str>(&RunInput {
         terms,
+        market: MarketDef::default_pair(),
         maker: ALICE,
         prev_locked: Amounts::new(150, 0),
         parks: vec![],
@@ -347,7 +351,7 @@ fn conservation_holds_across_generated_runs() {
             lots: 1 + next(200),
             expires_at: if next(4) == 0 { NOW } else { LATER },
         };
-        let lock = terms.initial_lock().unwrap();
+        let lock = terms.initial_lock(&MarketDef::default_pair()).unwrap();
         let takers = [BOB, CAROL, ALICE];
         let parks = (0..next(MAX_PARKS_PER_RUN as u64 + 1) as u32)
             .map(|i| {
@@ -364,7 +368,7 @@ fn conservation_holds_across_generated_runs() {
         let out = run(terms, lock, parks, mode);
         // execute_run already checks conservation; also check the lock stays
         // consistent so the next run can use it.
-        assert!(terms.remaining_lots(&out.locked).unwrap() <= terms.lots);
+        assert!(terms.remaining_lots(&out.locked, &MarketDef::default_pair()).unwrap() <= terms.lots);
     }
 }
 
@@ -417,8 +421,57 @@ fn amounts_arithmetic_is_checked_per_unit() {
 #[test]
 fn a_lock_holding_any_unit_but_the_makers_is_inconsistent() {
     let terms = alice_sell_100();
-    assert_eq!(terms.remaining_lots(&Amounts::of(UNIT_A, 6_000)), Ok(60));
-    assert_eq!(terms.remaining_lots(&Amounts::new(6_000, 1)), Err(CoreError::InconsistentLock));
+    assert_eq!(terms.remaining_lots(&Amounts::of(UNIT_A, 6_000), &MarketDef::default_pair()), Ok(60));
+    assert_eq!(terms.remaining_lots(&Amounts::new(6_000, 1), &MarketDef::default_pair()), Err(CoreError::InconsistentLock));
     let other = Amounts::of(UNIT_A, 6_000).checked_add(&Amounts::of("Z", 1)).unwrap();
-    assert_eq!(terms.remaining_lots(&other), Err(CoreError::InconsistentLock));
+    assert_eq!(terms.remaining_lots(&other, &MarketDef::default_pair()), Err(CoreError::InconsistentLock));
+}
+
+// ---------------------------------------------------------------------------
+// Markets: lot and tick size come from the market
+// ---------------------------------------------------------------------------
+
+fn c_market() -> MarketDef {
+    // C/HF: one lot is 1000 minor units of C, prices in steps of 0.05 HF.
+    MarketDef { base: "C".into(), quote: HUB_UNIT.into(), lot_size: 1_000, tick_size: 5 }
+}
+
+#[test]
+fn prices_must_sit_on_the_tick() {
+    let m = c_market();
+    let on = OrderTerms { side: Side::Sell, price_per_lot: 125, lots: 3, expires_at: LATER };
+    assert_eq!(on.validate(&m), Ok(()));
+    let off = OrderTerms { price_per_lot: 123, ..on };
+    assert_eq!(off.validate(&m), Err(CoreError::InvalidTerms("price_per_lot must be a multiple of the tick size")));
+    assert_eq!(off.validate(&MarketDef::default_pair()), Ok(()), "tick 1 accepts any price");
+}
+
+#[test]
+fn the_lock_and_fills_use_the_markets_lot_size_and_units() {
+    let m = c_market();
+    let terms = OrderTerms { side: Side::Sell, price_per_lot: 125, lots: 3, expires_at: LATER };
+    assert_eq!(terms.initial_lock(&m), Ok(Amounts::of("C", 3_000)));
+    let buy = OrderTerms { side: Side::Buy, ..terms };
+    assert_eq!(buy.initial_lock(&m), Ok(Amounts::of(HUB_UNIT, 375)));
+
+    let out = execute_run(&RunInput {
+        terms,
+        market: m.clone(),
+        maker: ALICE,
+        prev_locked: terms.initial_lock(&m).unwrap(),
+        parks: vec![park(1, BOB, Amounts::of(HUB_UNIT, 250), 2, NOW)],
+        now: NOW,
+        mode: RunMode::Fill,
+    })
+    .unwrap();
+    assert_eq!(paid_to(&out, BOB), Amounts::of("C", 2_000), "2 lots of 1000 C");
+    assert_eq!(paid_to(&out, ALICE), Amounts::of(HUB_UNIT, 250));
+    assert_eq!(out.locked, Amounts::of("C", 1_000));
+    assert_eq!(terms.remaining_lots(&out.locked, &m), Ok(1));
+}
+
+#[test]
+fn a_lock_in_the_wrong_markets_unit_is_inconsistent() {
+    let terms = OrderTerms { side: Side::Sell, price_per_lot: 125, lots: 3, expires_at: LATER };
+    assert_eq!(terms.remaining_lots(&Amounts::of(UNIT_A, 3_000), &c_market()), Err(CoreError::InconsistentLock));
 }

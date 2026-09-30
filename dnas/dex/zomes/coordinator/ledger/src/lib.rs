@@ -85,7 +85,7 @@ pub fn run_escrow(input: RunEscrowInput) -> ExternResult<Option<RunReport>> {
     let prev_run = my_runs.first().map(|(hash, _, _)| hash.clone());
     let prev_locked = match my_runs.first() {
         Some((_, _, run)) => run.locked.clone(),
-        None => escrow.terms.initial_lock().map_err(core_err)?,
+        None => escrow.terms.initial_lock(&MarketDef::default_pair()).map_err(core_err)?,
     };
     let consumed: BTreeSet<ActionHash> = my_runs
         .iter()
@@ -101,6 +101,7 @@ pub fn run_escrow(input: RunEscrowInput) -> ExternResult<Option<RunReport>> {
 
     let run_input = RunInput {
         terms: escrow.terms,
+        market: MarketDef::default_pair(),
         maker: me,
         prev_locked,
         parks,
@@ -180,17 +181,17 @@ pub fn get_escrow_state(escrow: ActionHash) -> ExternResult<EscrowState> {
 
     // Walk the runs in order. Lots still unfilled when the order was released
     // were returned to the maker, not sold, so they don't count as filled.
-    let mut locked = entry.terms.initial_lock().map_err(core_err)?;
+    let mut locked = entry.terms.initial_lock(&MarketDef::default_pair()).map_err(core_err)?;
     let mut unfilled_at_release = None;
     let mut released_at = None;
     for r in &runs {
         if r.run.mode == RunMode::Release && unfilled_at_release.is_none() {
-            unfilled_at_release = Some(entry.terms.remaining_lots(&locked).map_err(core_err)?);
+            unfilled_at_release = Some(entry.terms.remaining_lots(&locked, &MarketDef::default_pair()).map_err(core_err)?);
             released_at = Some(r.at);
         }
         locked = r.run.locked.clone();
     }
-    let remaining_lots = entry.terms.remaining_lots(&locked).map_err(core_err)?;
+    let remaining_lots = entry.terms.remaining_lots(&locked, &MarketDef::default_pair()).map_err(core_err)?;
     let unfilled = unfilled_at_release.unwrap_or(remaining_lots);
     let released = unfilled_at_release.is_some();
     Ok(EscrowState {
@@ -281,7 +282,7 @@ pub fn get_balance() -> ExternResult<BalanceView> {
             .max_by_key(|(_, seq, _)| *seq);
         let lock = match latest {
             Some((_, _, run)) => run.locked.clone(),
-            None => escrow.terms.initial_lock().map_err(core_err)?,
+            None => escrow.terms.initial_lock(&MarketDef::default_pair()).map_err(core_err)?,
         };
         locked_in_escrows = add(&locked_in_escrows, &lock)?;
     }
@@ -428,7 +429,7 @@ fn replay_fill(
                 .locked
                 .clone()
         }
-        None => entry.terms.initial_lock().map_err(core_err)?,
+        None => entry.terms.initial_lock(&MarketDef::default_pair()).map_err(core_err)?,
     };
     let mut parks = Vec::with_capacity(consuming.run.consumed.len());
     for hash in &consuming.run.consumed {
@@ -446,6 +447,7 @@ fn replay_fill(
     }
     let output = execute_run(&RunInput {
         terms: entry.terms,
+        market: MarketDef::default_pair(),
         maker: escrow_record.action().author().clone(),
         prev_locked,
         parks,

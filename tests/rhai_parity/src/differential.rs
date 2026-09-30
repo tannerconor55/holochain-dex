@@ -3,7 +3,7 @@
 //! draws in the same order), each run as the opening run and as a later run.
 
 use crate::engine::*;
-use dex_core::{Amounts, OrderTerms, RunMode, Side, MAX_PARKS_PER_RUN};
+use dex_core::{Amounts, MarketDef, OrderTerms, RunMode, Side, MAX_PARKS_PER_RUN};
 
 const NOW: i64 = 1_000_000;
 const LATER: i64 = 2_000_000;
@@ -46,7 +46,7 @@ fn template_matches_execute_run_on_generated_cases() {
     let mut runs = 0;
     let mut fills = 0;
     for c in generated() {
-        let lock = c.terms.initial_lock().unwrap();
+        let lock = c.terms.initial_lock(&MarketDef::default_pair()).unwrap();
         for start in [Start::Opening, Start::Locked(lock)] {
             let case = Case { start, ..c.clone() };
             let r = assert_parity(&case).expect("every generated case is valid");
@@ -66,7 +66,7 @@ fn template_matches_execute_run_from_partial_locks() {
     for c in generated().into_iter().take(500) {
         let half = c.terms.lots / 2;
         let part = match c.terms.side {
-            Side::Sell => Amounts::new(half * dex_core::LOT_SIZE_A, 0),
+            Side::Sell => Amounts::new(half * MarketDef::default_pair().lot_size, 0),
             Side::Buy => Amounts::new(0, half * c.terms.price_per_lot),
         };
         assert_parity(&Case { start: Start::Locked(part), ..c });
