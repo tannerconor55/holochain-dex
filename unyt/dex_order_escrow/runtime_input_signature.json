@@ -1,0 +1,63 @@
+{
+  "type": "object",
+  "properties": {
+    "consumed_inputs": {
+      "type": "object",
+      "properties": {
+        "maker_spender_allocations": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "amount": { "type": "object", "additionalProperties": { "type": "string" } },
+              "source": { "type": "string" }
+            },
+            "required": ["amount", "source"]
+          }
+        },
+        "taker_spender_allocations": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "amount": { "type": "object", "additionalProperties": { "type": "string" } },
+              "source": { "type": "string" }
+            },
+            "required": ["amount", "source"]
+          }
+        },
+        "requested_lots": {
+          "type": "array",
+          "items": { "type": "integer", "minimum": 0 }
+        }
+      }
+    },
+    "inputs": {
+      "type": "object",
+      "properties": {
+        "previous_execution": { "type": "object" },
+        "side": { "type": "string", "pattern": "^(Sell|Buy)$" },
+        "price_per_lot": { "type": "integer", "minimum": 1 },
+        "lots": { "type": "integer", "minimum": 1 },
+        "expires_at": { "type": "integer" },
+        "lot_size": { "type": "integer", "minimum": 1 },
+        "unit_a": { "type": "string", "pattern": "^[0-9]{1,3}$" },
+        "unit_b": { "type": "string", "pattern": "^[0-9]{1,3}$" },
+        "max_parks_per_run": { "type": "integer", "minimum": 1 },
+        "mode": { "type": "string", "pattern": "^(Fill|Release)$" }
+      },
+      "required": [
+        "side",
+        "price_per_lot",
+        "lots",
+        "expires_at",
+        "lot_size",
+        "unit_a",
+        "unit_b",
+        "max_parks_per_run",
+        "mode"
+      ]
+    }
+  },
+  "required": ["inputs"]
+}

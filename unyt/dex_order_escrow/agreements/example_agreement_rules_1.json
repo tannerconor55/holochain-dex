@@ -1,0 +1,35 @@
+{
+  "title": "example: sell 100.00 UNIT-A at 1.20 UNIT-B, expiring 2026-10-01",
+  "input_rules": [
+    { "name": "maker_spender_allocations", "instruction": { "ProvidedBy": "maker_spender" } },
+    { "name": "taker_spender_allocations", "instruction": { "ProvidedBy": "taker_spender" } },
+    { "name": "requested_lots", "instruction": { "ProvidedBy": "taker_spender" } },
+    { "name": "previous_execution", "instruction": { "Custom": "GetPreviousExecution" } },
+    { "name": "side", "instruction": { "Fixed": "Sell" } },
+    { "name": "price_per_lot", "instruction": { "Fixed": 120 } },
+    { "name": "lots", "instruction": { "Fixed": 100 } },
+    { "name": "expires_at", "instruction": { "Fixed": 1790812800000000 } },
+    { "name": "lot_size", "instruction": { "Fixed": 100 } },
+    { "name": "unit_a", "instruction": { "Fixed": "1" } },
+    { "name": "unit_b", "instruction": { "Fixed": "2" } },
+    { "name": "max_parks_per_run", "instruction": { "Fixed": 20 } },
+    { "name": "mode", "instruction": { "ExecutorProvided": null } }
+  ],
+  "executor_rules": { "AuthorizedExecutor": "uhCAk_placeholder_maker_agent_key" },
+  "roles": [
+    {
+      "ct_role_id": "maker_spender",
+      "display_name": "Maker",
+      "description": "Parks the order's opening lock (exactly lots x per-lot amount of the maker asset) and executes every run. Must be the same key as the AuthorizedExecutor: the lock is carried through previous_execution, which is per-executor. Replace the placeholder key.",
+      "qualification": { "Authorized": ["uhCAk_placeholder_maker_agent_key"] }
+    },
+    {
+      "ct_role_id": "taker_spender",
+      "display_name": "Taker",
+      "description": "Parks a spend in the taker asset with { \"requested_lots\": <n> } in the spend's payload. Anyone may take.",
+      "qualification": { "Any": null }
+    }
+  ],
+  "tags": [{ "Public": "dex" }],
+  "permissions": { "Default": null }
+}

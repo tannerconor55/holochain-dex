@@ -1,0 +1,41 @@
+{
+  "type": "object",
+  "properties": {
+    "unyt_allocation": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "receiver": { "type": "string" },
+          "amounts": { "type": "object", "additionalProperties": { "type": "string" } },
+          "sources": { "type": "array", "items": { "type": "string" } }
+        },
+        "required": ["receiver", "amounts", "sources"]
+      }
+    },
+    "locked": { "type": "object", "additionalProperties": { "type": "string" } },
+    "computed_values": {
+      "type": "object",
+      "properties": {
+        "mode": { "type": "string" },
+        "consumed": { "type": "array", "items": { "type": "string" } },
+        "outcomes": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "park": { "type": "string" },
+              "filled_lots": { "type": "integer" }
+            },
+            "required": ["park", "filled_lots"]
+          }
+        },
+        "filled_lots": { "type": "integer" },
+        "remaining_lots": { "type": "integer" },
+        "deferred_parks": { "type": "integer" }
+      },
+      "required": ["mode", "consumed", "outcomes", "filled_lots", "remaining_lots", "deferred_parks"]
+    }
+  },
+  "required": ["unyt_allocation", "locked", "computed_values"]
+}
