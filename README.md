@@ -16,18 +16,23 @@ Spec documents: *DEX MVP Protocol v0.1* and *Smart Agreement Plan v0.1*.
 | `ledger_integrity` / `ledger` (mock Unyt ledger) | Done. Runs on holochain 0.7.0. Park deadlines and anchored reclaim, balance checkpoints, units and markets from DNA properties. 17 crafted-chain tests run the real `validate` against every attack trace in `docs/design/taker-protection.md`. |
 | `dex_integrity`: listing links, validated against the escrow | Done. Wrong tag and wrong author rejected in a conductor. |
 | `dex` coordinator: listing, book, take planning, maker settlement, per-market reads, maker presence ping | Done. |
-| Signals (`park_placed`, `run_settled`) and maker auto-run | Done; the UI drives the auto-run. |
+| Signals (`park_placed`, `run_settled` with the recipient's fills, local `order_updated`) and maker auto-run | Done; the UI drives the auto-run. |
+| `dex_trades`: trades, 24 h market stats and OHLC candles derived from settlement runs | Done. 10 unit tests. Its own crate so trade logic never touches the DNA hash (see [DNA-hash note](#dna-hash-note)). |
+| Trade history externs: `get_recent_trades`, `get_market_stats`, `get_candles` (dex), `get_escrow_trades` (ledger) | Done. Derived on every call from existing runs; nothing stored. See [Trade history and notifications](#trade-history-and-notifications). |
+| Notifications: order filled / partial / expired / cancelled, trade settled, settlement failed, park reclaimable, funds waiting on an offline maker | Done. Signals plus poll fallback, deduplicated by stable keys; toasts and the activity log. |
 | Market orders (taker-only, IOC, slippage-limited; by lots or budget; one retry) | Done: `dex_core`, `dex` externs, UI. See [Market orders](#market-orders). |
-| Sweettest suite | 22 tests pass in ~4 min (each test starts its own conductors; the first build takes ~12 min, see [Build and test](#build-and-test)). Every test ends by checking total supply equals everything minted. |
-| UI (`ui/`): wallet, book, limit and market ticket, take flow, my orders, activity, maker presence warning, reclaim countdown and button, market selector | Done. 19 Vitest tests; Playwright runs the demo and a market order against two real conductors. |
+| Sweettest suite | 24 tests pass in ~4 min (each test starts its own conductors; the first build takes ~12 min, see [Build and test](#build-and-test)). Every test ends by checking total supply equals everything minted. |
+| UI (`ui/`): wallet, book, limit and market ticket, take flow, my orders, activity, maker presence warning, reclaim countdown and button, market selector, last price and 24 h stats, price chart, recent trades, toasts | Done. 33 Vitest tests (including notification dedupe and the poll fallback against the real store); Playwright runs the demo and a market order against two real conductors and checks trades, stats, chart and a toast. |
 | Unyt Smart Agreement template (`unyt/dex_order_escrow`, Rhai) | Done: 4,000 generated runs identical to `dex_core::execute_run` under the published `rave_engine` 0.12.0, park deadlines included. See [Unyt port](#unyt-port). |
 | Milestone 2: taker protection, checkpoints, multi-market | Done. Design and proofs: `docs/design/taker-protection.md`. |
+| Milestone 3: trade history, price data, reliable notifications | Done. No integrity or `dna.yaml` change; the DNA hash is unchanged. |
 
 ## Layout
 
 ```
 Cargo.toml                          workspace (zomes + dex_core)
 crates/dex_core/                    pure settlement logic, no Holochain deps
+crates/dex_trades/                  trades, stats and candles from runs (pure; not linked by integrity)
 dnas/dex/dna.yaml                   DNA manifest
 crates/ledger_api/, crates/dex_api/ extern input/output types
 dnas/dex/zomes/integrity/ledger/    mock Unyt ledger: entry types, validation
@@ -199,6 +204,31 @@ test of the rule; crafted-chain tests that feed backdated chains to the real
 as Holochain allows); and Sweettests on real conductors (a maker offline past
 the deadline, early, foreign and repeated reclaims, a settled park).
 
+## Trade history and notifications
+
+**Trades are derived, not stored.** A `Fill` run's lock shrinks by exactly
+the lots it filled, all at the order's price, so each such run is one trade;
+a `Release` run fills nothing. `dex_trades` turns an order's runs into
+trades, the last price and 24 h stats (open, change, high, low, lot and
+quote volume, count), and OHLC candles on epoch-aligned intervals (1 min to
+1 day, at most 1,000 per request). The ledger exposes one read,
+`get_escrow_trades`, so the dex zome still never reads ledger entries.
+
+**Read cost** grows with the market's history: every trade read walks every
+order ever listed in the market (closed ones too), then each order's runs.
+Orders whose listing expired before the requested window are skipped
+(nothing fills after expiry). Milestone 4 addresses this.
+
+**Notifications** come two ways and are shown once. Signals are fast but may
+be lost: each receiving taker's `run_settled` carries how their parks came
+out, and the maker's UI gets a local `order_updated` after each run. The
+10 s poll derives the same events from state changes (plus what no action
+announces: a park becoming reclaimable, funds waiting on a maker who does
+not answer a ping, a failed settlement or collection). Both paths build the
+same key from stable ids (park, escrow and status and filled lots, ...), so
+a missed signal only delays a notice. The first poll after loading records
+history silently (no replay) but still shows what needs action now.
+
 ## Market orders
 
 A market order is a **taker action only**: the client plans a sweep of resting
@@ -256,6 +286,18 @@ Externs: `preview_market_order`, `market_order`, `market_order_by_budget`,
   open (the UI drives the auto-run). Under hc-spin or a launcher the two run
   together; with a separately running conductor the check can pass while
   nothing settles.
+* **Signals can arrive before the data.** A run's signal can reach the taker
+  before their node sees the run: the toast ("Trade settled") comes first,
+  and the take panel, wallet and My takes catch up on a later poll (within
+  10 s once gossip delivers the run).
+* **Price data refreshes every 30 s.** Recent trades, the 24 h stats and the
+  chart are re-read at most every 30 s and on settlement signals, because
+  each read walks the market's whole order history (above); a trade from an
+  order the reader has no signal for can take up to 30 s to show.
+* **Trade timestamps are the maker's.** A trade's time is its run's action
+  timestamp, which the maker asserts (as Unyt's `executed_timestamp` is the
+  executor's); a maker with a wrong clock misplaces their trades on the
+  chart. Validation only guarantees timestamps never go backwards on a chain.
 * **Reclaim becomes available eventually.** After the maker's anchoring
   action, the taker's node may take a few seconds to see it (the UI polls
   every 10 s).
@@ -397,5 +439,11 @@ with what the port answered:
 Anything under `dnas/dex/zomes/integrity/` and `dnas/dex/dna.yaml`
 (including its `properties`: units, markets, timing) is part of the DNA hash.
 Changing them creates a new network. The crafted-chain tests under
-`integrity/ledger/tests/` are not compiled into the wasm and do not. Keep integrity changes in
+`integrity/ledger/tests/` are not compiled into the wasm and do not.
+
+So does any change to `crates/dex_core` or `crates/ledger_api`: both
+integrity zomes link them, and even an unused new module changes their
+wasm. Logic validation never needs goes in its own crate (`dex_trades`).
+Check with `sha256sum target/wasm32-unknown-unknown/release/*_integrity.wasm`
+before and after `./build.sh`, or compare `hc dna hash dnas/dex/workdir/dex.dna`. Keep integrity changes in
 their own commits, separate from coordinator, UI and test changes.

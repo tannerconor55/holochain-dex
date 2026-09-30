@@ -376,3 +376,33 @@ Open:
 - The collected set in checkpoints grows with history (design doc section 7).
 - On Unyt: reclaim of a parked spend (README Unyt question 1) and a helper
   returning a parked link's timestamp (question 13).
+
+## Milestone 3 — trade history, price data and notifications — done
+
+No integrity or `dna.yaml` change; the DNA hash is unchanged (integrity wasm
+checked by sha256 after every build, and `hc dna hash`). Branch
+`trade-history`, from `main` fast-forwarded to `order-book`.
+
+| Step | Commit | |
+|---|---|---|
+| 1 | `2f31145` | `dex_trades`: trades, 24 h stats, OHLC candles (pure, integer maths, 10 tests) |
+| 2 | `1bb700a` | `get_recent_trades`, `get_market_stats`, `get_candles`; ledger `get_escrow_trades`; trades Sweettest |
+| 3 | `c415bf5` | signals (`run_settled` fills, local `order_updated`), notification keys, poll fallback |
+| 4 | `52803fb` | UI: header stats, price chart (dataviz method), recent trades, toasts |
+| 5 | `7d70dea` | notification dedupe and poll-fallback tests (Vitest), `order_updated` Sweettest |
+| 6 | this commit | docs |
+
+Deviations, reported when made:
+- `dex_trades` is its own crate, not `dex_core::trades`: any change to
+  `dex_core` changes the integrity wasm and the DNA hash (verified). The
+  CLAUDE.md DNA-hash rule now covers `dex_core` and `ledger_api`; milestone
+  2's steps 3-5 very likely changed the DNA hash unlabelled (harmless: that
+  milestone reset the network anyway).
+- The trades Sweettest landed with step 2 so the externs were exercised
+  before the step-2 review.
+
+Open:
+- Trade and book reads grow with the market's whole history (milestone 4).
+- `maker_offline_park_is_reclaimed_after_the_deadline` failed once in five
+  full runs early in the milestone and not since; its message was not
+  captured then.
