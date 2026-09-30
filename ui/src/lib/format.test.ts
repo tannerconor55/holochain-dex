@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { assertMinor, formatAmount, formatAveragePrice, formatCountdown, formatExpiry, formatSigned, parseAmount, parseBps, parseLots } from "./format";
+import { assertMinor, formatAmount, formatAveragePrice, formatChangePercent, formatCountdown, formatExpiry, formatSigned, parseAmount, parseBps, parseLots } from "./format";
 
 describe("formatAmount", () => {
   it("formats minor units with two decimals", () => {
@@ -116,5 +116,15 @@ describe("formatCountdown", () => {
     expect(formatCountdown(now + 3_723_000_000, now)).toBe("1:02:03");
     expect(formatCountdown(now + 400_000, now)).toBe("0:01");
     expect(formatCountdown(now - 5_000_000, now)).toBe("0:00");
+  });
+});
+
+describe("formatChangePercent", () => {
+  it("is a signed share of the open, truncated to 2 decimals, integer maths", () => {
+    expect(formatChangePercent(1, 120)).toBe("+0.83%");
+    expect(formatChangePercent(-5, 130)).toBe("−3.84%");
+    expect(formatChangePercent(0, 120)).toBe("0.00%");
+    expect(formatChangePercent(120, 120)).toBe("+100.00%");
+    expect(formatChangePercent(1, 0)).toBeNull();
   });
 });

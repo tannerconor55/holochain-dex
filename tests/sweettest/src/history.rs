@@ -106,3 +106,43 @@ async fn trades_appear_after_fills_and_stats_follow() {
     assert!(too_wide.is_err());
     env.assert_supply().await;
 }
+
+/// The next `OrderUpdated` on this stream, skipping other signals.
+async fn next_order_update(signals: &mut Signals) -> dex_api::DexSignal {
+    loop {
+        let s = next_dex_signal(signals).await;
+        if matches!(s, dex_api::DexSignal::OrderUpdated { .. }) {
+            return s;
+        }
+    }
+}
+
+/// The maker's UI hears the order's new status after each of its runs: a
+/// partial fill, then a cancel. (The poll derives the same, so a lost signal
+/// only delays the notification.)
+#[tokio::test(flavor = "multi_thread")]
+async fn order_updates_follow_each_run() {
+    use dex_api::DexSignal;
+    let env = TestEnv::new(2).await;
+    let mut alice_signals = env.signals(ALICE);
+    let _: ActionHash = env.call(ALICE, "mint", Amounts::new(4_000, 0)).await;
+    let _: ActionHash = env.call(BOB, "mint", Amounts::new(0, 1_200)).await;
+    let order: ActionHash = env.dex(ALICE, "place_order", place(sell(40, 120))).await;
+    env.sync().await;
+    let _: TakeResult = env
+        .dex(BOB, "take", TakeRequest { market: None, take: Side::Buy, lots: 10, limit_price: None })
+        .await;
+    env.sync().await;
+
+    let fill: Vec<RunReport> = env.dex(ALICE, "run_my_orders", ()).await;
+    assert_eq!(
+        next_order_update(&mut alice_signals).await,
+        DexSignal::OrderUpdated { escrow: order.clone(), run: fill[0].run.clone(), status: OrderStatus::Partial, filled_lots: 10, lots: 40 }
+    );
+    let cancel: Vec<RunReport> = env.dex(ALICE, "cancel_order", order.clone()).await;
+    assert_eq!(
+        next_order_update(&mut alice_signals).await,
+        DexSignal::OrderUpdated { escrow: order.clone(), run: cancel[0].run.clone(), status: OrderStatus::Cancelled, filled_lots: 10, lots: 40 }
+    );
+    env.assert_supply().await;
+}

@@ -86,7 +86,8 @@ describe("DexApi", () => {
     emit(appSignal("ledger", { type: "park_placed" }));
     emit(appSignal("dex", { type: "something_else" }));
     emit(appSignal("dex", { type: "run_settled", escrow: hash(1), run: hash(5), maker: hash(6), mode: "Fill" }));
-    expect(seen).toEqual(["park_placed", "run_settled"]);
+    emit(appSignal("dex", { type: "order_updated", escrow: hash(1), run: hash(5), status: "Partial", filled_lots: 1, lots: 2 }));
+    expect(seen).toEqual(["park_placed", "run_settled", "order_updated"]);
   });
 });
 
