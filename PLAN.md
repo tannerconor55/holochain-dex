@@ -320,3 +320,14 @@ exactly; roles `maker_spender` and `taker_spender`.
 
 Open: the [DNA] items and questions 1–12 in README "Swapping in real Unyt";
 replacing the `ledger` zomes with Unyt itself.
+
+## Milestone 2 — taker protection and validation performance (in progress)
+
+One integrity (DNA-hash) change: (A) park timeout / reclaim, (B) balance
+checkpoints; plus client-side (C) maker presence check and (D) faster
+Sweettests. Design: `docs/design/taker-protection.md`.
+
+Decision (2026-09-30, asked before design): **multi-market support (generic
+pair, per-market lot and tick size) is folded into this same integrity
+change**, so the network resets once. Its design is not part of the
+taker-protection document and is still to be done.
