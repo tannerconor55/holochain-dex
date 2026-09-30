@@ -19,7 +19,7 @@ Spec documents: *DEX MVP Protocol v0.1* and *Smart Agreement Plan v0.1*.
 | Market orders (taker-only, IOC, slippage-limited; by lots or budget; one retry) | Done: `dex_core`, `dex` externs, UI. See [Market orders](#market-orders). |
 | Sweettest suite | 16 tests pass (~20 min; each test starts its own conductors). |
 | UI (`ui/`): wallet, book, limit and market ticket, take flow, my orders, activity | Done. 16 Vitest tests; Playwright runs the demo and a market order against two real conductors. |
-| Rhai Smart Agreement template for real Unyt | Later; port of `dex_core::execute_run`. |
+| Unyt Smart Agreement template (`unyt/dex_order_escrow`, Rhai) | Done: 4,000 generated runs identical to `dex_core::execute_run` under the published `rave_engine` 0.12.0. See [Unyt port](#unyt-port). |
 
 ## Layout
 
@@ -27,10 +27,15 @@ Spec documents: *DEX MVP Protocol v0.1* and *Smart Agreement Plan v0.1*.
 Cargo.toml                          workspace (zomes + dex_core)
 crates/dex_core/                    pure settlement logic, no Holochain deps
 dnas/dex/dna.yaml                   DNA manifest
+crates/ledger_api/, crates/dex_api/ extern input/output types
 dnas/dex/zomes/integrity/ledger/    mock Unyt ledger: entry types, validation
 dnas/dex/zomes/coordinator/ledger/  mock Unyt ledger: zome functions
+dnas/dex/zomes/{integrity,coordinator}/dex/  order book: listings, reads, takes
 workdir/happ.yaml                   hApp manifest (role "dex")
 tests/sweettest/                    multi-agent conductor tests (own workspace)
+unyt/dex_order_escrow/              the settlement run as a Unyt Smart Agreement (Rhai)
+tests/rhai_parity/                  template vs dex_core under rave_engine (own workspace)
+ui/                                 Svelte UI
 flake.nix                           holonix main-0.7 dev shell
 build.sh                            wasm build + dna/happ pack
 ```
@@ -42,6 +47,7 @@ nix develop                       # holonix 0.7 shell: rust, wasm target, hc, ho
 cargo test -p dex_core            # fast: settlement logic
 ./build.sh                        # zomes -> wasm -> dex.dna -> dex.happ
 cargo test --manifest-path tests/sweettest/Cargo.toml   # conductor tests
+cargo test --manifest-path tests/rhai_parity/Cargo.toml # Rhai template vs dex_core (~75 s)
 ```
 
 Keep `tests/sweettest/Cargo.lock`: it pins a resolution of the conductor's
@@ -181,21 +187,102 @@ Externs: `preview_market_order`, `market_order`, `market_order_by_budget`,
 * **Reads always use the network.** v1 targets desktop full-arc nodes only; phones
   (zero-arc nodes) would need an explicit local/network choice on every read.
 
+## Unyt port
+
+`unyt/dex_order_escrow/` is one settlement run as a Unyt Smart Agreement
+template: Rhai execution code plus its schemas, roles and an example
+(never-instantiated) agreement. One agreement instance per order, executed
+by the maker. Its README covers roles, inputs, outputs and trust
+assumptions. `tests/rhai_parity/` runs it through the published
+`rave_engine` crate (pinned `=0.12.0`, built against `hdk 0.7` / `hdi 0.8`,
+the same line as this repo) and compares every run with
+`dex_core::execute_run`.
+
+Tags: **[engine]** is shown by running the published crate; **[DNA]** can
+only be checked on a Unyt network, because the validator is not public.
+
+### Results
+
+| Check | Result |
+|---|---|
+| Differential: `dex_core`'s own generator (same seed and draws), 2,000 cases, each as an opening run and as a later run | 4,000 runs identical: allocations per receiver, locked, consumed order, per-park fills, deferred parks (186,180 lots filled) |
+| From half-sold locks | 500 more runs identical |
+| Every `dex_core` unit-test scenario, both starts where possible | identical, including §30 chained through the engine's own output, the cap and the deferred park's next run, and the same refusals (duplicate park, bad lock, invalid terms) |
+| Conservation per unit and source naming, checked on every Rhai output | hold |
+| Formatter and parsers, run from the shipped script | exact 2 decimals, no `-0`, `i64::MAX`, round trips; RFC3339 with 0/3/6 fractional digits |
+| Mutation check | an expiry off-by-one and a reversed tie-break each fail a scenario |
+
+**Operations** (binary search on `max_operations`, default budget 100,000):
+
+| Run | Operations |
+|---|---|
+| no parks | 964 |
+| 1 park | 1,849 |
+| 20 parks (the cap) | 13,129 (13% of the budget; 608 per park) |
+| opening run with 20 parks | 13,215 |
+| 25 parks, 5 deferred | 13,369 |
+
+### What is proven, and what only Unyt can confirm
+
+Proven by running the published engine [engine]:
+- The script compiles and runs under `rave_engine` 0.12.0 with its limits,
+  and its output parses as a `RAVEOutput`: unit-map strings, name-only
+  allocations (`amounts: {}`), two units in one allocation, `rejected_links`.
+- Priority comes from the real `acceding_sort_allocation`, fed parked-link
+  records by a mocked host (its stable timestamp sort, with ties broken by a
+  source-hash presort in the script).
+- Given the inputs the DNA is documented to pass, every output equals
+  `dex_core::execute_run`, and per-unit conservation holds by the harness's
+  own check.
+
+Only checkable on a Unyt network [DNA]:
+- Conservation per unit, and that a source counts once an allocation names it.
+- That a `ProvidedBy: taker_spender` input named `requested_lots` is filled
+  from each spend's payload (`ParkedLink::get_input_for_key` is published;
+  its caller is not).
+- Which links a run is handed, in what order, and how many.
+- `AuthorizedExecutor` enforcement, the refusal of a lock under `Any`, and
+  the re-run on validation.
+- Whether `runtime_input_signature.json` is applied to recorded inputs.
+
 ## Swapping in real Unyt
 
 The `ledger` coordinator's functions are the whole settlement interface:
 `mint`, `open_escrow`, `park`, `run_escrow`, `collect_all`, plus reads. To move
-to Unyt, reimplement that surface against Unyt Smart Agreements and remove the
-two `ledger` zomes. Things to confirm with Unyt at that point:
+to Unyt, reimplement that surface against Unyt Smart Agreements built from
+`unyt/dex_order_escrow` and remove the two `ledger` zomes. Questions for Unyt,
+with what the port answered:
 
-1. Can a parked spend be withdrawn before an agreement consumes it?
-2. Can one network carry UNIT-A and UNIT-B, and one run move both?
-3. How does a script identify who created a parked data record?
+1. Can a parked spend be withdrawn before an agreement consumes it? *Open.*
+2. Can one network carry UNIT-A and UNIT-B, and one run move both? *Partly
+   answered:* a unit map holds several indexes and one allocation carries both
+   [engine]. Open: per-unit conservation [DNA], and that both units allow at
+   least 2 decimals (amounts are written as `"123.45"`).
+3. How does a script identify who created a parked data record? *Answered:*
+   `get_spend_links_author` resolves any parked link, data links included
+   [engine]. The template avoids needing it: `requested_lots` rides in the
+   taker spend's own payload.
 4. Can any agent create a Smart Agreement per order, being both spender and
-   `AuthorizedExecutor`?
-5. Which `rave_engine` version does the network run (needs ≥ 0.7)?
-6. Can another hApp call Unyt's zome functions, or only a UI?
-7. Is the Unyt DNA bundle available for Sweettest?
+   `AuthorizedExecutor`? *Open.*
+5. Which `rave_engine` version does the network run? *Open.* The template is
+   built and tested on 0.12.0 (Holochain 0.7); it needs at least 0.7 and
+   relies on 0.11's deferring of host fetch errors.
+6. Can another hApp call Unyt's zome functions, or only a UI? *Open.*
+7. Is the Unyt DNA bundle available for Sweettest? *Open;* it would turn every
+   [DNA] item above into a test.
+8. *New:* does the DNA fill a `ProvidedBy` input named `requested_lots` from the
+   spend link's payload? If not, the fallback is a `ParkedData(true)` request
+   role paired by author.
+9. *New:* in what order, and how many at most, are a role's parked links
+   handed to an aggregate run? The script sorts them itself; a cap below 20
+   would matter.
+10. *New:* are links returned in `rejected_links` offered to the next run?
+    (They stay on chain [engine]; the template relies on the next run seeing them.)
+11. *New:* must a carried lock be named as a source when an allocation draws
+    on it, or is it inherited? The template names it (`previous_execution.id`),
+    as `lockbox` does.
+12. *New:* can the maker park the opening spend targeted at themselves as the
+    executor, and does `GetPreviousExecution` see nothing on that first run?
 
 ## DNA-hash note
 

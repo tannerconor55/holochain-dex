@@ -280,7 +280,6 @@ Not done / open:
   hand-picked run (validation accepts it by design).
 - Demo step 6 (1-minute expiry, two-taker race) is covered in Sweettest, not
   in the Playwright script.
-- Rhai Smart Agreement template (a later plan).
 
 ## Market orders — done
 
@@ -301,3 +300,23 @@ unchanged.
 Open question: the limit formulas round buy up and sell down, which loosens
 the limit by up to one minor unit per lot. Flip to buy floor / sell ceil if
 the limit must never exceed the stated slippage.
+
+## Unyt template port — done
+
+`unyt/dex_order_escrow` (Rhai) does what one `SettlementRun` does;
+`tests/rhai_parity` proves it matches `dex_core::execute_run` under the
+published `rave_engine` 0.12.0 (see README "Unyt port"). No zome, integrity
+or `dna.yaml` change.
+
+Approved design decisions: `requested_lots` rides in the taker spend's own
+payload (no separate request role); ties break by source hash after the
+host's timestamp sort; the opening maker spend must equal the initial lock
+exactly; roles `maker_spender` and `taker_spender`.
+
+1. `Add dex_order_escrow Rhai template`
+2. `Add Rhai parity harness`: 4,000 generated runs identical, every dex_core
+   scenario, formatter and parsers, 13,129 operations at the 20-park cap.
+3. `Document Unyt template port`
+
+Open: the [DNA] items and questions 1–12 in README "Swapping in real Unyt";
+replacing the `ledger` zomes with Unyt itself.

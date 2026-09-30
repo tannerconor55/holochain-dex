@@ -13,6 +13,7 @@ README.md for design, invariants and known limitations. Use the `holochain`,
 - `nix develop -c cargo test -p dex_core` — settlement logic unit tests
 - `nix develop -c ./build.sh` — build wasm, pack `dex.dna` and `dex.happ`
 - `nix develop -c cargo test --manifest-path tests/sweettest/Cargo.toml` — conductor tests (needs `./build.sh` first)
+- `nix develop -c cargo test --manifest-path tests/rhai_parity/Cargo.toml` — `unyt/dex_order_escrow` vs `dex_core` under rave_engine; rerun after any change to `execute_run` or the template
 - In `ui/`: `nix develop .. -c npm start` (two agents via hc-spin), `npm test` (Vitest),
   `npm run check` (svelte-check), `npm run e2e` (Playwright demo; starts `scripts/sandbox.sh`)
 - UI types in `ui/src/lib/api.ts` mirror `ledger_api` / `dex_api` / `dex_core` by hand:
@@ -35,11 +36,10 @@ README.md for design, invariants and known limitations. Use the `holochain`,
 
 ## Next steps
 
-1. Run `./build.sh` and the Sweettest suite; fix anything the conductor surfaces
-   (the zomes have only been type-checked natively so far).
-2. `dex` integrity + coordinator zomes: `Order` discovery entries/links keyed by
-   market side and price, price-level aggregation, calls into `ledger`.
-3. Signals (post_commit) for park/run/collect notifications; maker auto-run.
-4. UI.
-5. Rhai Smart Agreement template ported from `dex_core::execute_run`, tested
-   against the published `rave_engine` crate.
+Done (see PLAN.md status): order book zomes, signals and maker auto-run
+(inline, synchronous commits), UI, market orders, and the Unyt template
+`unyt/dex_order_escrow`, proven against `dex_core::execute_run` by
+`tests/rhai_parity` (keep the two in step).
+
+Next: answer the Unyt questions in README "Swapping in real Unyt", then
+replace the mock `ledger` zomes with Unyt agreements built from the template.
