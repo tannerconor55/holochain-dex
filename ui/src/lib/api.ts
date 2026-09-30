@@ -107,6 +107,11 @@ export interface ParkStatus {
   requested_lots: number;
   parked_at: number;
   settlement: { run: ActionHash; filled_lots: number } | null;
+  /** No run may consume the park after this (µs). */
+  deadline: number;
+  reclaimed: ActionHash | null;
+  /** `reclaimPark` should succeed now. */
+  reclaimable: boolean;
 }
 
 export interface PriceLevel {
@@ -237,6 +242,7 @@ export class DexApi {
   mint = (amounts: Amounts) => this.call<ActionHash>("ledger", "mint", amounts);
   balance = () => this.call<BalanceView>("ledger", "get_balance");
   collectAll = () => this.call<ActionHash[]>("ledger", "collect_all");
+  reclaimPark = (park: ActionHash) => this.call<ActionHash>("ledger", "reclaim_park", park);
 
   // dex: book
   book = () => this.call<BookView>("dex", "get_order_book");

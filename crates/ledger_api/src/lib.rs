@@ -105,6 +105,15 @@ pub struct ParkStatus {
     pub parked_at: Timestamp,
     /// `None` while the park waits for the maker's next run.
     pub settlement: Option<ParkSettlement>,
+    /// After this, no run may consume the park; the taker may reclaim it once
+    /// the maker has written anything at or after it.
+    pub deadline: Timestamp,
+    /// The Reclaim that took the park back, if any.
+    pub reclaimed: Option<ActionHash>,
+    /// Unsettled, unreclaimed, past its deadline, and the maker has written an
+    /// action since: `reclaim_park` will succeed (unless a run is still
+    /// gossiping in).
+    pub reclaimable: bool,
 }
 
 #[derive(Serialize, Deserialize, Debug)]

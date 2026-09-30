@@ -11,11 +11,12 @@
 //! | `park`              | taker parks a spend + request data                     |
 //! | `run_escrow`        | maker executes the agreement (a RAVE)                  |
 //! | `collect_all`       | receivers collect allocations                          |
+//! | `reclaim_park`      | taker withdraws a parked spend never consumed          |
 //!
 //! Reads use `GetStrategy::Network` throughout: v1 targets desktop full-arc
 //! nodes only.
 
-use dex_core::checkpoint::CheckpointState;
+use dex_core::checkpoint::{CheckpointState, CHECKPOINT_AFTER_ACTIONS, CHECKPOINT_EVERY};
 use dex_core::properties::DexProperties;
 use dex_core::timeout::park_deadline;
 use dex_core::{execute_run, select_parks, ParkInput, RunInput};
@@ -34,7 +35,9 @@ use std::collections::BTreeSet;
 /// Test faucet. MVP only.
 #[hdk_extern]
 pub fn mint(amounts: Amounts) -> ExternResult<ActionHash> {
-    create_entry(&EntryTypes::Mint(Mint { amounts }))
+    let hash = create_entry(&EntryTypes::Mint(Mint { amounts }))?;
+    checkpoint_if_due()?;
+    Ok(hash)
 }
 
 /// Open an order's escrow in a declared market, locking the maker's funds.
@@ -46,7 +49,7 @@ pub fn open_escrow(request: OpenEscrowRequest) -> ExternResult<ActionHash> {
     let escrow = create_entry(&EntryTypes::Escrow(Escrow {
         market: request.market,
         terms: request.terms,
-        checkpoint: own_chain()?.latest_checkpoint,
+        checkpoint: checkpoint_if_due()?,
     }))?;
     create_link(my_key()?, escrow.clone(), LinkTypes::AgentToEscrows, ())?;
     Ok(escrow)
@@ -62,7 +65,7 @@ pub fn park(request: ParkRequest) -> ExternResult<ActionHash> {
         market: escrow.market,
         amounts: request.amounts,
         requested_lots: request.requested_lots,
-        checkpoint: own_chain()?.latest_checkpoint,
+        checkpoint: checkpoint_if_due()?,
     }))?;
     create_link(request.escrow, park.clone(), LinkTypes::EscrowToParks, ())?;
     Ok(park)
@@ -153,6 +156,7 @@ pub fn run_escrow(input: RunEscrowInput) -> ExternResult<Option<RunReport>> {
             (),
         )?;
     }
+    checkpoint_if_due()?;
 
     Ok(Some(RunReport {
         run: run_hash,
@@ -176,8 +180,7 @@ pub fn run_escrow(input: RunEscrowInput) -> ExternResult<Option<RunReport>> {
 #[hdk_extern]
 pub fn collect_all() -> ExternResult<Vec<ActionHash>> {
     let me = my_key()?;
-    let own = own_chain()?;
-    let collected = collected_set(&own);
+    let collected = collected_set(&own_chain()?);
     let mut created = Vec::new();
     for (run_hash, run) in incoming_runs(&me)? {
         for (index, allocation) in run.allocations.iter().enumerate() {
@@ -189,11 +192,48 @@ pub fn collect_all() -> ExternResult<Vec<ActionHash>> {
                 run: run_hash.clone(),
                 index,
                 amounts: allocation.amounts.clone(),
-                checkpoint: own.latest_checkpoint.clone(),
+                // Rechecked per collect: one call can write many.
+                checkpoint: checkpoint_if_due()?,
             }))?);
         }
     }
     Ok(created)
+}
+
+/// Take back a park its maker never settled.
+///
+/// Possible once the park's deadline has passed **and** the maker has written
+/// any action at or after it: that action is the anchor proving no run can
+/// still consume the park (design doc section 4.2). A maker who never writes
+/// again cannot be reclaimed against; the error says so.
+#[hdk_extern]
+pub fn reclaim_park(park: ActionHash) -> ExternResult<ActionHash> {
+    let me = my_key()?;
+    let props = props()?;
+    let timing = props.timing().map_err(|e| guest(e.to_string()))?;
+    let park_record = get_record(&park)?;
+    let Some(EntryTypes::Park(parked)) = decode_record(&park_record)? else {
+        return Err(guest(format!("{park} is not a park")));
+    };
+    if park_record.action().author() != &me {
+        return Err(guest("only the park's author can reclaim it"));
+    }
+    if own_chain()?.reclaims.iter().any(|r| r.park == park) {
+        return Err(guest("this park was already reclaimed"));
+    }
+    if escrow_runs(&parked.escrow)?.iter().any(|r| r.run.consumed.contains(&park)) {
+        return Err(guest("this park was settled by the maker"));
+    }
+    let (escrow_record, escrow) = get_escrow(&parked.escrow)?;
+    let deadline = park_deadline(park_record.action().timestamp().as_micros(), escrow.terms.expires_at, &timing)
+        .ok_or_else(|| guest("park deadline overflows"))?;
+    let anchor = maker_anchor(escrow_record.action().author(), deadline)?.ok_or_else(|| {
+        guest("not reclaimable yet: the maker has written nothing since the park's deadline")
+    })?;
+    let hash = create_entry(&EntryTypes::Reclaim(Reclaim { park, anchor }))?;
+    create_link(parked.escrow, hash.clone(), LinkTypes::EscrowToReclaims, ())?;
+    checkpoint_if_due()?;
+    Ok(hash)
 }
 
 // ---------------------------------------------------------------------------
@@ -263,6 +303,10 @@ pub fn get_pending_parks(escrow: ActionHash) -> ExternResult<Vec<PendingPark>> {
 /// Parks the caller has placed, newest first, with how each resolved.
 #[hdk_extern]
 pub fn get_my_parks() -> ExternResult<Vec<ParkStatus>> {
+    let props = props()?;
+    let timing = props.timing().map_err(|e| guest(e.to_string()))?;
+    let now = sys_time()?.as_micros();
+    let own = own_chain()?;
     let mut out = Vec::new();
     for record in query(ChainQueryFilter::new().include_entries(true))?.into_iter().rev() {
         let Some(EntryTypes::Park(park)) = decode_record(&record)? else {
@@ -277,6 +321,14 @@ pub fn get_my_parks() -> ExternResult<Vec<ParkStatus>> {
             }),
             None => None,
         };
+        let (escrow_record, escrow) = get_escrow(&park.escrow)?;
+        let deadline = park_deadline(record.action().timestamp().as_micros(), escrow.terms.expires_at, &timing)
+            .ok_or_else(|| guest("park deadline overflows"))?;
+        let reclaimed = own.reclaims_by_park.get(&hash).cloned();
+        let reclaimable = settlement.is_none()
+            && reclaimed.is_none()
+            && now >= deadline
+            && maker_anchor(escrow_record.action().author(), deadline)?.is_some();
         out.push(ParkStatus {
             park: hash,
             escrow: park.escrow,
@@ -284,6 +336,9 @@ pub fn get_my_parks() -> ExternResult<Vec<ParkStatus>> {
             requested_lots: park.requested_lots,
             parked_at: record.action().timestamp(),
             settlement,
+            deadline: Timestamp::from_micros(deadline),
+            reclaimed,
+            reclaimable,
         });
     }
     Ok(out)
@@ -407,7 +462,14 @@ struct OwnChain {
     runs: Vec<(ActionHash, u32, SettlementRun)>,
     collects: Vec<Collect>,
     reclaims: Vec<Reclaim>,
+    reclaims_by_park: std::collections::BTreeMap<ActionHash, ActionHash>,
     latest_checkpoint: Option<ActionHash>,
+    /// The latest checkpoint's `action_seq`.
+    checkpoint_seq: Option<u32>,
+    /// The chain head's `action_seq`.
+    head_seq: u32,
+    /// Ledger entries after the latest checkpoint.
+    ledger_since_checkpoint: usize,
     /// Every ledger entry, oldest first.
     ledger: Vec<(ActionHash, EntryTypes)>,
 }
@@ -415,15 +477,24 @@ struct OwnChain {
 fn own_chain() -> ExternResult<OwnChain> {
     let mut own = OwnChain::default();
     for record in query(ChainQueryFilter::new().include_entries(true))? {
+        own.head_seq = own.head_seq.max(record.action().action_seq());
         let Some(entry) = decode_record(&record)? else { continue };
         let hash = record.action_address().clone();
+        own.ledger_since_checkpoint += 1;
         match &entry {
             EntryTypes::Escrow(e) => own.escrows.push((hash.clone(), e.clone())),
             EntryTypes::Park(p) => own.parks.push((hash.clone(), p.clone())),
             EntryTypes::SettlementRun(r) => own.runs.push((hash.clone(), record.action().action_seq(), r.clone())),
             EntryTypes::Collect(c) => own.collects.push(c.clone()),
-            EntryTypes::Reclaim(r) => own.reclaims.push(r.clone()),
-            EntryTypes::Checkpoint(_) => own.latest_checkpoint = Some(hash.clone()),
+            EntryTypes::Reclaim(r) => {
+                own.reclaims.push(r.clone());
+                own.reclaims_by_park.insert(r.park.clone(), hash.clone());
+            }
+            EntryTypes::Checkpoint(_) => {
+                own.latest_checkpoint = Some(hash.clone());
+                own.checkpoint_seq = Some(record.action().action_seq());
+                own.ledger_since_checkpoint = 0;
+            }
             EntryTypes::Mint(_) => {}
         }
         own.ledger.push((hash, entry));
@@ -441,6 +512,40 @@ fn own_state(own: &OwnChain, props: &DexProperties) -> ExternResult<CheckpointSt
         }
     }
     CheckpointState::genesis().extend(&events).map_err(|e| guest(e.to_string()))
+}
+
+/// The checkpoint the next ledger write should cite, writing a new one first
+/// when `CHECKPOINT_EVERY` ledger entries or `CHECKPOINT_AFTER_ACTIONS`
+/// actions follow the last. A checkpoint equals the author's whole-chain
+/// state, which is what validation re-derives from the previous one.
+fn checkpoint_if_due() -> ExternResult<Option<ActionHash>> {
+    let own = own_chain()?;
+    let actions_since = match own.checkpoint_seq {
+        Some(seq) => own.head_seq.saturating_sub(seq) as usize,
+        None => own.head_seq as usize + 1,
+    };
+    if own.ledger_since_checkpoint < CHECKPOINT_EVERY && actions_since < CHECKPOINT_AFTER_ACTIONS {
+        return Ok(own.latest_checkpoint);
+    }
+    let state = own_state(&own, &props()?)?;
+    let hash = create_entry(&EntryTypes::Checkpoint(Checkpoint { prev: own.latest_checkpoint.clone(), state }))?;
+    Ok(Some(hash))
+}
+
+/// The maker's latest action if it is stamped at or after `deadline`: an
+/// anchor a Reclaim can cite.
+fn maker_anchor(maker: &AgentPubKey, deadline: i64) -> ExternResult<Option<ActionHash>> {
+    let status = get_agent_activity(
+        maker.clone(),
+        ChainQueryFilter::new(),
+        ActivityRequest::Full,
+        GetOptions::network(),
+    )?;
+    let Some((_, head)) = status.valid_activity.iter().max_by_key(|(seq, _)| *seq) else {
+        return Ok(None);
+    };
+    let record = get_record(head)?;
+    Ok((record.action().timestamp().as_micros() >= deadline).then(|| head.clone()))
 }
 
 fn collected_set(own: &OwnChain) -> BTreeSet<(ActionHash, u32)> {

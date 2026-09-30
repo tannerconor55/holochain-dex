@@ -17,6 +17,12 @@ use serde::{Deserialize, Serialize};
 /// segment near 100 actions, well inside [`MAX_ACTIONS_SINCE_CHECKPOINT`].
 pub const CHECKPOINT_EVERY: usize = 32;
 
+/// ... or once this many actions follow it, whichever comes first. A run is
+/// one ledger entry but up to 22 actions (its entry plus a link per receiver),
+/// so counting entries alone could overrun the hard limit; half of it leaves
+/// room for a whole zome call's writes after the check.
+pub const CHECKPOINT_AFTER_ACTIONS: usize = MAX_ACTIONS_SINCE_CHECKPOINT / 2;
+
 /// A debit, collect or reclaim is invalid when more actions than this follow
 /// the checkpoint it cites, so skipping checkpoints cannot make validators
 /// walk without bound. A Checkpoint itself is exempt, so an author past the
