@@ -47,7 +47,7 @@ fn paid_to(out: &RunOutput<u32, &'static str>, who: &str) -> Amounts {
     out.allocations
         .iter()
         .find(|a| a.receiver == who)
-        .map(|a| a.amounts)
+        .map(|a| a.amounts.clone())
         .unwrap_or_default()
 }
 
@@ -203,14 +203,14 @@ fn expired_order_refunds_takers_and_keeps_lock_until_release() {
     let lock = terms.initial_lock().unwrap();
     let out = run(
         terms,
-        lock,
+        lock.clone(),
         vec![park(1, BOB, Amounts::new(0, 4_800), 40, NOW - 1)],
         RunMode::Fill,
     );
     assert_eq!(paid_to(&out, BOB), Amounts::new(0, 4_800), "no fill after expiry");
     assert_eq!(out.locked, lock);
 
-    let release = run(terms, lock, vec![], RunMode::Release);
+    let release = run(terms, lock.clone(), vec![], RunMode::Release);
     assert_eq!(paid_to(&release, ALICE), lock);
 }
 
@@ -266,7 +266,7 @@ fn park_order_does_not_change_the_result() {
     reversed.reverse();
     let lock = terms.initial_lock().unwrap();
     assert_eq!(
-        run(terms, lock, parks, RunMode::Fill),
+        run(terms, lock.clone(), parks, RunMode::Fill),
         run(terms, lock, reversed, RunMode::Fill)
     );
 }
@@ -366,4 +366,59 @@ fn conservation_holds_across_generated_runs() {
         // consistent so the next run can use it.
         assert!(terms.remaining_lots(&out.locked).unwrap() <= terms.lots);
     }
+}
+
+// ---------------------------------------------------------------------------
+// Amounts: a normalised, ordered unit map
+// ---------------------------------------------------------------------------
+
+#[test]
+fn amounts_never_store_zero_units() {
+    assert_eq!(Amounts::new(0, 0), Amounts::ZERO);
+    assert!(Amounts::new(0, 0).is_zero());
+    assert_eq!(Amounts::new(5, 0), Amounts::of(UNIT_A, 5));
+    // Subtracting to zero removes the unit, so the result equals a fresh map.
+    let back = Amounts::new(5, 7).checked_sub(&Amounts::new(5, 0)).unwrap();
+    assert_eq!(back, Amounts::of(HUB_UNIT, 7));
+    assert_eq!(back.units().collect::<Vec<_>>(), vec![(HUB_UNIT, 7)]);
+}
+
+#[test]
+fn equal_amounts_serialise_identically_in_unit_order() {
+    let built_one_way = Amounts::of("Z", 1).checked_add(&Amounts::of(UNIT_A, 2)).unwrap();
+    let built_other_way = Amounts::of(UNIT_A, 2).checked_add(&Amounts::of("Z", 1)).unwrap();
+    let a = serde_json::to_string(&built_one_way).unwrap();
+    let b = serde_json::to_string(&built_other_way).unwrap();
+    assert_eq!(a, b);
+    assert_eq!(a, r#"{"A":2,"Z":1}"#, "a plain map, ordered by unit id");
+}
+
+#[test]
+fn a_zero_valued_or_unnamed_unit_does_not_deserialise() {
+    assert!(serde_json::from_str::<Amounts>(r#"{"A":0}"#).is_err());
+    assert!(serde_json::from_str::<Amounts>(r#"{"A":1,"HF":0}"#).is_err());
+    assert!(serde_json::from_str::<Amounts>(r#"{"":1}"#).is_err());
+    assert_eq!(serde_json::from_str::<Amounts>(r#"{"HF":4800}"#).unwrap(), Amounts::new(0, 4_800));
+    assert_eq!(serde_json::from_str::<Amounts>("{}").unwrap(), Amounts::ZERO);
+}
+
+#[test]
+fn amounts_arithmetic_is_checked_per_unit() {
+    let max = Amounts::of(UNIT_A, u64::MAX);
+    assert_eq!(max.checked_add(&Amounts::of(UNIT_A, 1)), None, "overflow");
+    assert!(max.checked_add(&Amounts::of(HUB_UNIT, 1)).is_some(), "other units are independent");
+    assert_eq!(Amounts::new(1, 5).checked_sub(&Amounts::new(2, 0)), None, "underflow in any unit");
+    assert_eq!(Amounts::new(1, 5).checked_sub(&Amounts::of("Z", 1)), None, "an absent unit is zero");
+    assert!(Amounts::new(3, 5).covers(&Amounts::new(3, 0)));
+    assert!(!Amounts::new(3, 5).covers(&Amounts::of("Z", 1)));
+    assert!(Amounts::new(3, 5).covers(&Amounts::ZERO));
+}
+
+#[test]
+fn a_lock_holding_any_unit_but_the_makers_is_inconsistent() {
+    let terms = alice_sell_100();
+    assert_eq!(terms.remaining_lots(&Amounts::of(UNIT_A, 6_000)), Ok(60));
+    assert_eq!(terms.remaining_lots(&Amounts::new(6_000, 1)), Err(CoreError::InconsistentLock));
+    let other = Amounts::of(UNIT_A, 6_000).checked_add(&Amounts::of("Z", 1)).unwrap();
+    assert_eq!(terms.remaining_lots(&other), Err(CoreError::InconsistentLock));
 }

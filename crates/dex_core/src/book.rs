@@ -219,8 +219,8 @@ pub fn plan_take<P: Ord + Clone, K: PartialEq>(
             terms.maker_asset(),
             fill.checked_mul(terms.maker_units_per_lot()).ok_or(CoreError::Overflow)?,
         );
-        plan.total_cost = plan.total_cost.checked_add(cost).ok_or(CoreError::Overflow)?;
-        plan.total_receives = plan.total_receives.checked_add(receives).ok_or(CoreError::Overflow)?;
+        plan.total_cost = plan.total_cost.checked_add(&cost).ok_or(CoreError::Overflow)?;
+        plan.total_receives = plan.total_receives.checked_add(&receives).ok_or(CoreError::Overflow)?;
         plan.filled += fill;
         plan.shortfall -= fill;
         plan.fills.push(PlannedFill {

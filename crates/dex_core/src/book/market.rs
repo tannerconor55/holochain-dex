@@ -208,11 +208,11 @@ fn within(take: Side, price: u64, limit: u64) -> bool {
     }
 }
 
-/// The paying asset's amount: B for a buy, A for a sell.
+/// The paying asset's amount: HF for a buy, A for a sell.
 fn pay(take: Side, amounts: &Amounts) -> u64 {
     match take {
-        Side::Buy => amounts.b,
-        Side::Sell => amounts.a,
+        Side::Buy => amounts.get(crate::HUB_UNIT),
+        Side::Sell => amounts.get(crate::UNIT_A),
     }
 }
 

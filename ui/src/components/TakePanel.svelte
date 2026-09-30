@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { b64, sameHash, shortHash, type Side, type TakePlan, type TakeResult } from "../lib/api";
+  import { amt, b64, HUB, sameHash, shortHash, UNIT_A, type Side, type TakePlan, type TakeResult } from "../lib/api";
   import { message, type DexStore } from "../lib/dex.svelte";
   import { formatAmount, parseAmount, parseLots } from "../lib/format";
 
@@ -23,7 +23,8 @@
   });
 
   let buying = $derived(selection.take === "Buy");
-  let payAsset = $derived(buying ? "B" : "A");
+  let payAsset = $derived(buying ? HUB : UNIT_A);
+  let getAsset = $derived(buying ? UNIT_A : HUB);
   let lots = $derived(parseLots(quantity));
   let limitPrice = $derived(parseAmount(limit));
 
@@ -44,8 +45,8 @@
     return () => clearTimeout(timer);
   });
 
-  let cost = $derived(plan ? (buying ? plan.total_cost.b : plan.total_cost.a) : 0);
-  let available = $derived(store.balance ? (buying ? store.balance.available.b : store.balance.available.a) : null);
+  let cost = $derived(plan ? amt(plan.total_cost, payAsset) : 0);
+  let available = $derived(store.balance ? amt(store.balance.available, payAsset) : null);
   let blocked = $derived.by(() => {
     if (!plan) return "Enter a quantity to see what you would take.";
     if (plan.filled === 0) return "Nothing to take at or better than your limit (your own orders are skipped).";
@@ -74,13 +75,13 @@
 
 <section class="panel" aria-labelledby="take-h">
   <div class="title">
-    <h2 id="take-h">{buying ? "Buy" : "Sell"} A at {formatAmount(selection.price_per_lot)} B or better</h2>
+    <h2 id="take-h">{buying ? "Buy" : "Sell"} A at {formatAmount(selection.price_per_lot)} HF or better</h2>
     <button onclick={onclose} aria-label="Close the take panel">Close</button>
   </div>
 
   {#if result}
     <p>
-      Parked {formatAmount(buying ? result.plan.total_cost.b : result.plan.total_cost.a)} {payAsset} across
+      Parked {formatAmount(amt(result.plan.total_cost, payAsset))} {payAsset} across
       {result.parks.length} order(s). Each maker settles automatically while their app is open.
     </p>
     <table>
@@ -109,7 +110,7 @@
               <td>…{shortHash(f.order)}</td>
               <td class="num">{formatAmount(f.price_per_lot)}</td>
               <td class="num">{f.lots}</td>
-              <td class="num">{formatAmount(buying ? f.cost.b : f.cost.a)} {payAsset}</td>
+              <td class="num">{formatAmount(amt(f.cost, payAsset))} {payAsset}</td>
             </tr>
           {/each}
           <tr class="total">
@@ -121,8 +122,8 @@
         </tbody>
       </table>
       <p class="hint">
-        You receive {formatAmount(buying ? plan.total_receives.a : plan.total_receives.b)}
-        {buying ? "A" : "B"} if every maker fills. Anything a maker cannot fill is refunded.
+        You receive {formatAmount(amt(plan.total_receives, getAsset))}
+        {getAsset} if every maker fills. Anything a maker cannot fill is refunded.
       </p>
     {/if}
     {#if plan && plan.shortfall > 0 && plan.filled > 0}

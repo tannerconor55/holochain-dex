@@ -4,7 +4,7 @@
 // store re-reads and calls idempotent externs; it also polls, so a missed
 // signal only delays settlement.
 
-import { b64, shortHash, type BalanceView, type BookView, type DexApi, type DexSignal, type MyOrder, type ParkStatus } from "./api";
+import { amt, b64, shortHash, type Amounts, type BalanceView, type BookView, type DexApi, type DexSignal, type MyOrder, type ParkStatus } from "./api";
 import { formatAmount } from "./format";
 
 export const POLL_MS = 10_000;
@@ -111,7 +111,7 @@ export class DexStore {
       if (reports?.length) await this.refresh();
     }
     const u = this.balance?.uncollected;
-    if (u && (u.a > 0 || u.b > 0)) {
+    if (u && Object.keys(u).length > 0) {
       const collected = await this.write("Collecting", this.api.collectAll);
       if (collected?.length) {
         this.log("collected", `Collected ${formatPair(u)} into your balance`);
@@ -202,12 +202,12 @@ export class DexStore {
 
 export function orderLabel(o: MyOrder): string {
   const t = o.state.terms;
-  return `${t.side === "Sell" ? "sell" : "buy"} ${t.lots} A @ ${formatAmount(t.price_per_lot)} B`;
+  return `${t.side === "Sell" ? "sell" : "buy"} ${t.lots} A @ ${formatAmount(t.price_per_lot)} HF`;
 }
 
-/** "12.00 A + 3.50 B", omitting zero components ("0.00" if both are zero). */
-export function formatPair(x: { a: number; b: number }): string {
-  const parts = [x.a ? `${formatAmount(x.a)} A` : "", x.b ? `${formatAmount(x.b)} B` : ""].filter(Boolean);
+/** "12.00 A + 3.50 HF": every unit held, in unit order ("0.00" if none). */
+export function formatPair(x: Amounts): string {
+  const parts = Object.keys(x).sort().filter((u) => amt(x, u) > 0).map((u) => `${formatAmount(amt(x, u))} ${u}`);
   return parts.length ? parts.join(" + ") : "0.00";
 }
 

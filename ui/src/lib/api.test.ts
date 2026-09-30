@@ -30,12 +30,12 @@ describe("DexApi", () => {
   it("routes wallet calls to the ledger zome and book calls to the dex zome", async () => {
     const { client, calls } = stubClient();
     const api = new DexApi(client);
-    await api.mint({ a: 10_000, b: 0 });
+    await api.mint({ A: 10_000 });
     await api.book();
     await api.levelOrders("Sell", 120);
     await api.runMyOrders();
     expect(calls).toEqual([
-      { role_name: "dex", zome_name: "ledger", fn_name: "mint", payload: { a: 10_000, b: 0 } },
+      { role_name: "dex", zome_name: "ledger", fn_name: "mint", payload: { A: 10_000 } },
       { role_name: "dex", zome_name: "dex", fn_name: "get_order_book", payload: null },
       { role_name: "dex", zome_name: "dex", fn_name: "get_level_orders", payload: { side: "Sell", price_per_lot: 120 } },
       { role_name: "dex", zome_name: "dex", fn_name: "run_my_orders", payload: null },

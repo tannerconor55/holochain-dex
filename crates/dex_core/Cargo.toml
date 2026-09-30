@@ -6,3 +6,6 @@ description = "Pure, deterministic DEX settlement logic shared by validation and
 
 [dependencies]
 serde = { workspace = true }
+
+[dev-dependencies]
+serde_json = "1"

@@ -1,5 +1,5 @@
 <script lang="ts">
-  import type { Amounts } from "../lib/api";
+  import { amounts, amt, HUB, UNIT_A, type Amounts } from "../lib/api";
   import type { DexStore } from "../lib/dex.svelte";
   import { formatAmount, parseAmount } from "../lib/format";
 
@@ -18,21 +18,22 @@
     ["Uncollected", "uncollected"],
   ];
 
-  const sum = (xs: Amounts[]) => xs.reduce((s, x) => ({ a: s.a + x.a, b: s.b + x.b }), { a: 0, b: 0 });
+  const UNITS = [UNIT_A, HUB];
+  const sum = (xs: Amounts[], unit: string) => xs.reduce((s, x) => s + amt(x, unit), 0);
   let adds = $derived.by(() => {
     const v = store.balance;
     if (!v) return true;
-    const s = sum([v.available, v.locked_in_escrows, v.parked, v.uncollected]);
-    return s.a === v.total.a && s.b === v.total.b;
+    const rows = [v.available, v.locked_in_escrows, v.parked, v.uncollected];
+    return UNITS.every((u) => sum(rows, u) === amt(v.total, u));
   });
 
   let mint = $derived.by((): { amounts: Amounts } | { reason: string } => {
     const ma = parseAmount(a || "0");
     const mb = parseAmount(b || "0");
     if (ma === null || mb === null) return { reason: "Amounts need at most two decimals." };
-    if (ma === 0 && mb === 0) return { reason: "Enter an amount of A, B or both." };
+    if (ma === 0 && mb === 0) return { reason: "Enter an amount of A, HF or both." };
     if (ma > MAX_MINT || mb > MAX_MINT) return { reason: "At most 1,000,000.00 of each per request." };
-    return { amounts: { a: ma, b: mb } };
+    return { amounts: amounts([[UNIT_A, ma], [HUB, mb]]) };
   });
 
   async function getFunds(e: SubmitEvent) {
@@ -49,20 +50,18 @@
   {#if store.balance}
     <table>
       <thead>
-        <tr><th></th><th class="num">UNIT-A</th><th class="num">UNIT-B</th></tr>
+        <tr><th></th>{#each UNITS as u (u)}<th class="num">{u}</th>{/each}</tr>
       </thead>
       <tbody>
         {#each rows as [label, key] (key)}
           <tr>
             <td>{label}</td>
-            <td class="num">{formatAmount(store.balance[key].a)}</td>
-            <td class="num">{formatAmount(store.balance[key].b)}</td>
+            {#each UNITS as u (u)}<td class="num">{formatAmount(amt(store.balance[key], u))}</td>{/each}
           </tr>
         {/each}
         <tr class="total">
           <td>Total</td>
-          <td class="num">{formatAmount(store.balance.total.a)}</td>
-          <td class="num">{formatAmount(store.balance.total.b)}</td>
+          {#each UNITS as u (u)}<td class="num">{formatAmount(amt(store.balance.total, u))}</td>{/each}
         </tr>
       </tbody>
     </table>
@@ -80,7 +79,7 @@
 
   <form class="faucet" onsubmit={getFunds}>
     <label>A <input inputmode="decimal" bind:value={a} aria-describedby="faucet-hint" /></label>
-    <label>B <input inputmode="decimal" bind:value={b} aria-describedby="faucet-hint" /></label>
+    <label>HF <input inputmode="decimal" bind:value={b} aria-describedby="faucet-hint" /></label>
     <button type="submit" disabled={!("amounts" in mint)}>Get test funds</button>
   </form>
   <p class="hint" id="faucet-hint">

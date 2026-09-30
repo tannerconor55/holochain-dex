@@ -25,7 +25,7 @@
 </script>
 
 <header>
-  <h1>UNIT-A / UNIT-B</h1>
+  <h1>A / HF</h1>
   {#if store}
     <span class="muted agent" title="Your agent key">agent …{shortHash(store.api.me)}</span>
     {#if store.pending.length}

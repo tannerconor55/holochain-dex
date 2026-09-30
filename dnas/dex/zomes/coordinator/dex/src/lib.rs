@@ -197,7 +197,7 @@ fn park_plan(plan: &TakePlan<ActionHash>, orders: &[Order]) -> ExternResult<Vec<
             "park",
             ParkRequest {
                 escrow: fill.order.clone(),
-                amounts: fill.cost,
+                amounts: fill.cost.clone(),
                 requested_lots: fill.lots,
             },
         )?;

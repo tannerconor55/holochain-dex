@@ -1,5 +1,5 @@
 <script lang="ts">
-  import type { Side } from "../lib/api";
+  import { amt, HUB, UNIT_A, type Side } from "../lib/api";
   import type { DexStore } from "../lib/dex.svelte";
   import { formatAmount, nowMicros, parseAmount, parseLots } from "../lib/format";
   import MarketForm from "./MarketForm.svelte";
@@ -26,9 +26,9 @@
     if (pricePerLot === null || pricePerLot === 0) return { reason: "Enter a price above 0 with at most two decimals." };
     if (lots === null) return { reason: "Enter a whole number of A (1 lot = 1.00 A)." };
     const lock = side === "Sell" ? lots * 100 : lots * pricePerLot;
-    const asset = side === "Sell" ? "A" : "B";
+    const asset = side === "Sell" ? UNIT_A : HUB;
     if (!Number.isSafeInteger(lock)) return { reason: "That order is too large." };
-    const available = store.balance ? (side === "Sell" ? store.balance.available.a : store.balance.available.b) : null;
+    const available = store.balance ? amt(store.balance.available, asset) : null;
     if (available !== null && lock > available) {
       return { reason: `You lock ${formatAmount(lock)} ${asset} but have ${formatAmount(available)} ${asset} available.`, lock, asset };
     }
@@ -70,7 +70,7 @@
       {/each}
     </div>
     <div class="fields">
-      <label>Price (B per A) <input inputmode="decimal" class="num" bind:value={price} /></label>
+      <label>Price (HF per A) <input inputmode="decimal" class="num" bind:value={price} /></label>
       <label>Quantity (A) <input inputmode="numeric" class="num" bind:value={quantity} /></label>
       <label>
         Expires

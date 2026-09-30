@@ -1,6 +1,6 @@
 //! # dex_core
 //!
-//! Pure, deterministic settlement logic for the UNIT-A / UNIT-B limit-order DEX.
+//! Pure, deterministic settlement logic for the UNIT-A / HF limit-order DEX.
 //!
 //! This crate has no Holochain dependency. The same function, [`execute_run`], is
 //! called by the maker's coordinator to *produce* a settlement run and by every
@@ -14,12 +14,12 @@
 //!
 //! * Both assets use 2 decimals: `100` minor units = `1.00`.
 //! * A *lot* is [`LOT_SIZE_A`] minor units of UNIT-A (1.00 A).
-//! * An order's price is `price_per_lot`: UNIT-B minor units paid per lot.
-//!   `1.20 B per A` with a 1.00 A lot is `price_per_lot = 120`.
+//! * An order's price is `price_per_lot`: HF minor units paid per lot.
+//!   `1.20 HF per A` with a 1.00 A lot is `price_per_lot = 120`.
 //! * Quote for a fill = `lots × price_per_lot`, an exact integer.
 
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 pub mod book;
 pub mod listing;
@@ -41,62 +41,101 @@ pub const MAX_MINT: u64 = 1_000_000 * 100;
 // Amounts
 // ---------------------------------------------------------------------------
 
-/// Amounts of both assets, in minor units. The MVP analogue of a Unyt unit map.
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Amounts {
-    pub a: u64,
-    pub b: u64,
+/// A unit's id, as the DNA properties declare it (`"A"`, `"HF"`, ...).
+pub type UnitId = String;
+
+/// UNIT-A, the default market's base unit.
+pub const UNIT_A: &str = "A";
+
+/// HF, the hub unit every market is quoted in.
+pub const HUB_UNIT: &str = "HF";
+
+/// Minor units by unit. The MVP analogue of a Unyt unit map.
+///
+/// Normalised: a zero-valued unit is never stored, so equal amounts are always
+/// equal maps and always serialise to the same bytes. An ordered map, so
+/// iteration and serialisation are deterministic. Deserialising a map that
+/// holds a zero or an empty unit id is refused rather than normalised, so a
+/// non-canonical form can never be read back as an entry.
+#[derive(Debug, Default, Clone, PartialEq, Eq, Hash, Serialize)]
+#[serde(transparent)]
+pub struct Amounts(BTreeMap<UnitId, u64>);
+
+impl<'de> Deserialize<'de> for Amounts {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let map = BTreeMap::<UnitId, u64>::deserialize(deserializer)?;
+        if map.values().any(|v| *v == 0) {
+            return Err(serde::de::Error::custom("amounts must not hold a zero-valued unit"));
+        }
+        if map.keys().any(|k| k.is_empty()) {
+            return Err(serde::de::Error::custom("amounts must not hold an empty unit id"));
+        }
+        Ok(Amounts(map))
+    }
 }
 
 impl Amounts {
-    pub const ZERO: Amounts = Amounts { a: 0, b: 0 };
+    pub const ZERO: Amounts = Amounts(BTreeMap::new());
 
-    pub fn new(a: u64, b: u64) -> Self {
-        Self { a, b }
+    /// The default market's pair: `a` minor units of A and `hf` of HF.
+    pub fn new(a: u64, hf: u64) -> Self {
+        let mut out = Self::ZERO;
+        out.put(UNIT_A, a);
+        out.put(HUB_UNIT, hf);
+        out
     }
 
-    pub fn of(asset: Asset, amount: u64) -> Self {
-        match asset {
-            Asset::A => Self { a: amount, b: 0 },
-            Asset::B => Self { a: 0, b: amount },
+    pub fn of(unit: &str, amount: u64) -> Self {
+        let mut out = Self::ZERO;
+        out.put(unit, amount);
+        out
+    }
+
+    fn put(&mut self, unit: &str, amount: u64) {
+        if amount == 0 {
+            self.0.remove(unit);
+        } else {
+            self.0.insert(unit.to_string(), amount);
         }
     }
 
-    pub fn get(&self, asset: Asset) -> u64 {
-        match asset {
-            Asset::A => self.a,
-            Asset::B => self.b,
-        }
+    /// The amount of `unit`; absent means zero.
+    pub fn get(&self, unit: &str) -> u64 {
+        self.0.get(unit).copied().unwrap_or(0)
+    }
+
+    /// Every non-zero unit, in unit-id order.
+    pub fn units(&self) -> impl Iterator<Item = (&str, u64)> {
+        self.0.iter().map(|(unit, amount)| (unit.as_str(), *amount))
     }
 
     pub fn is_zero(&self) -> bool {
-        self.a == 0 && self.b == 0
+        self.0.is_empty()
     }
 
-    pub fn checked_add(self, other: Amounts) -> Option<Amounts> {
-        Some(Amounts {
-            a: self.a.checked_add(other.a)?,
-            b: self.b.checked_add(other.b)?,
-        })
+    pub fn checked_add(&self, other: &Amounts) -> Option<Amounts> {
+        let mut out = self.clone();
+        for (unit, amount) in other.units() {
+            let sum = out.get(unit).checked_add(amount)?;
+            out.put(unit, sum);
+        }
+        Some(out)
     }
 
-    pub fn checked_sub(self, other: Amounts) -> Option<Amounts> {
-        Some(Amounts {
-            a: self.a.checked_sub(other.a)?,
-            b: self.b.checked_sub(other.b)?,
-        })
+    /// `None` if any unit would go below zero.
+    pub fn checked_sub(&self, other: &Amounts) -> Option<Amounts> {
+        let mut out = self.clone();
+        for (unit, amount) in other.units() {
+            let difference = out.get(unit).checked_sub(amount)?;
+            out.put(unit, difference);
+        }
+        Some(out)
     }
 
-    /// True if every component of `self` is at least the matching component of `other`.
+    /// True if every unit of `self` is at least the matching unit of `other`.
     pub fn covers(&self, other: &Amounts) -> bool {
-        self.a >= other.a && self.b >= other.b
+        other.units().all(|(unit, amount)| self.get(unit) >= amount)
     }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum Asset {
-    A,
-    B,
 }
 
 // ---------------------------------------------------------------------------
@@ -105,9 +144,9 @@ pub enum Asset {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Side {
-    /// Maker sells UNIT-A for UNIT-B. Maker escrows A.
+    /// Maker sells UNIT-A for HF. Maker escrows A.
     Sell,
-    /// Maker buys UNIT-A with UNIT-B. Maker escrows B.
+    /// Maker buys UNIT-A with HF. Maker escrows HF.
     Buy,
 }
 
@@ -116,7 +155,7 @@ pub enum Side {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OrderTerms {
     pub side: Side,
-    /// UNIT-B minor units per lot.
+    /// HF minor units per lot.
     pub price_per_lot: u64,
     /// Lots offered (sell) or wanted (buy).
     pub lots: u64,
@@ -126,18 +165,18 @@ pub struct OrderTerms {
 
 impl OrderTerms {
     /// The asset the maker escrows and delivers.
-    pub fn maker_asset(&self) -> Asset {
+    pub fn maker_asset(&self) -> &'static str {
         match self.side {
-            Side::Sell => Asset::A,
-            Side::Buy => Asset::B,
+            Side::Sell => UNIT_A,
+            Side::Buy => HUB_UNIT,
         }
     }
 
     /// The asset takers pay with.
-    pub fn taker_asset(&self) -> Asset {
+    pub fn taker_asset(&self) -> &'static str {
         match self.side {
-            Side::Sell => Asset::B,
-            Side::Buy => Asset::A,
+            Side::Sell => HUB_UNIT,
+            Side::Buy => UNIT_A,
         }
     }
 
@@ -180,7 +219,7 @@ impl OrderTerms {
     /// Lots still fillable, derived from a locked amount. The lock is the only
     /// source of truth for the remaining quantity.
     pub fn remaining_lots(&self, locked: &Amounts) -> Result<u64, CoreError> {
-        if locked.get(self.taker_asset()) != 0 {
+        if locked.units().any(|(unit, _)| unit != self.maker_asset()) {
             return Err(CoreError::InconsistentLock);
         }
         let held = locked.get(self.maker_asset());
@@ -354,13 +393,13 @@ where
         // `affordable` guarantees the park covers `taker_pays`.
         let refund = park
             .amounts
-            .checked_sub(taker_pays)
+            .checked_sub(&taker_pays)
             .ok_or(CoreError::Overflow)?;
 
         credit(
             &mut allocations,
             &park.taker,
-            taker_gets.checked_add(refund).ok_or(CoreError::Overflow)?,
+            taker_gets.checked_add(&refund).ok_or(CoreError::Overflow)?,
         )?;
         credit(&mut allocations, &input.maker, taker_pays)?;
 
@@ -410,7 +449,7 @@ fn credit<K: Clone + PartialEq>(
         Some(existing) => {
             existing.amounts = existing
                 .amounts
-                .checked_add(amounts)
+                .checked_add(&amounts)
                 .ok_or(CoreError::Overflow)?;
         }
         None => allocations.push(Allocation {
@@ -427,14 +466,14 @@ pub fn check_conservation<P, K>(
     input: &RunInput<P, K>,
     output: &RunOutput<P, K>,
 ) -> Result<(), CoreError> {
-    let mut inflow = input.prev_locked;
+    let mut inflow = input.prev_locked.clone();
     for park in &input.parks {
-        inflow = inflow.checked_add(park.amounts).ok_or(CoreError::Overflow)?;
+        inflow = inflow.checked_add(&park.amounts).ok_or(CoreError::Overflow)?;
     }
-    let mut outflow = output.locked;
+    let mut outflow = output.locked.clone();
     for alloc in &output.allocations {
         outflow = outflow
-            .checked_add(alloc.amounts)
+            .checked_add(&alloc.amounts)
             .ok_or(CoreError::Overflow)?;
     }
     if inflow == outflow {

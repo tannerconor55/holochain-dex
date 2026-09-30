@@ -27,15 +27,30 @@ export type Side = "Sell" | "Buy";
 export type RunMode = "Fill" | "Release";
 export type OrderStatus = "Open" | "Partial" | "Filled" | "Cancelled" | "Expired";
 
-/** Minor units of UNIT-A (`a`) and UNIT-B (`b`). */
-export interface Amounts {
-  a: number;
-  b: number;
+/** A unit's id, as the DNA properties declare it. */
+export type UnitId = string;
+/** The default market's base unit. */
+export const UNIT_A: UnitId = "A";
+/** HF, the hub unit every market is quoted in. */
+export const HUB: UnitId = "HF";
+
+/**
+ * Minor units by unit id (dex_core::Amounts). Normalised on the Rust side:
+ * a zero-valued unit is absent, and a map holding a zero is refused.
+ */
+export type Amounts = Record<UnitId, number>;
+
+/** The amount of `unit`; absent means zero. */
+export const amt = (x: Amounts | null | undefined, unit: UnitId): number => x?.[unit] ?? 0;
+
+/** Build an Amounts with zero units left out, as the zomes require. */
+export function amounts(entries: [UnitId, number][]): Amounts {
+  return Object.fromEntries(entries.filter(([, n]) => n > 0));
 }
 
 export interface OrderTerms {
   side: Side;
-  /** UNIT-B minor units per lot (one lot = 1.00 A). */
+  /** HF minor units per lot (one lot = 1.00 A). */
   price_per_lot: number;
   lots: number;
   /** Microseconds since the epoch. */

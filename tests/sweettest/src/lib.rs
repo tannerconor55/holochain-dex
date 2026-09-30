@@ -118,7 +118,7 @@ impl TestEnv {
     async fn total_supply(&self) -> Amounts {
         let mut total = Amounts::ZERO;
         for agent in 0..self.agents.len() {
-            total = total.checked_add(self.balance(agent).await.total).unwrap();
+            total = total.checked_add(&self.balance(agent).await.total).unwrap();
         }
         total
     }
@@ -289,7 +289,7 @@ async fn two_takers_cannot_both_fill_the_same_escrow() {
 
     let bob = env.balance(BOB).await.available;
     let carol = env.balance(CAROL).await.available;
-    let winners = [bob, carol]
+    let winners = [bob.clone(), carol.clone()]
         .iter()
         .filter(|b| **b == Amounts::new(10_000, 0))
         .count();

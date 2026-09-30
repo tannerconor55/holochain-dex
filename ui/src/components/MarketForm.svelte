@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { b64, sameHash, shortHash, type MarketAmount, type MarketPlan, type MarketResult, type Side } from "../lib/api";
+  import { amt, b64, sameHash, shortHash, HUB, UNIT_A, type Amounts, type MarketAmount, type MarketPlan, type MarketResult, type Side } from "../lib/api";
   import { message, type DexStore } from "../lib/dex.svelte";
   import { formatAmount, formatAveragePrice, parseAmount, parseBps, parseLots } from "../lib/format";
 
@@ -18,10 +18,10 @@
   let retryNote = $state<string | null>(null);
 
   let buying = $derived(side === "Buy");
-  let payAsset = $derived(buying ? "B" : "A");
-  let getAsset = $derived(buying ? "A" : "B");
-  let pay = (x: { a: number; b: number }) => (buying ? x.b : x.a);
-  let get = (x: { a: number; b: number }) => (buying ? x.a : x.b);
+  let payAsset = $derived(buying ? HUB : UNIT_A);
+  let getAsset = $derived(buying ? UNIT_A : HUB);
+  let pay = (x: Amounts) => amt(x, payAsset);
+  let get = (x: Amounts) => amt(x, getAsset);
 
   let bps = $derived(parseBps(slippage));
   let amount = $derived.by((): MarketAmount | null => {
@@ -111,8 +111,8 @@
       // Either way this was the one retry: keep it so the button goes away.
       results = [...results, r.result];
       retryNote = r.result.parks.length
-        ? `Retried ${r.unfilled_lots} lots within the original limit ${limit} B.`
-        : `Nothing is on the book within the original limit ${limit} B; ${r.unfilled_lots} lots stay unfilled.`;
+        ? `Retried ${r.unfilled_lots} lots within the original limit ${limit} HF.`
+        : `Nothing is on the book within the original limit ${limit} HF; ${r.unfilled_lots} lots stay unfilled.`;
     }
     await store.refresh();
   }
@@ -122,7 +122,7 @@
   {@const first = results[0]!}
   <div class="result" aria-live="polite">
     <p>
-      <strong>Market {side === "Buy" ? "buy" : "sell"}</strong> within {formatAmount(first.plan.limit_price)} B:
+      <strong>Market {side === "Buy" ? "buy" : "sell"}</strong> within {formatAmount(first.plan.limit_price)} HF:
       filled <strong class="num">{filledLots}</strong> lots so far{waiting ? `, ${waiting} park(s) waiting for makers` : ""}.
       Each maker settles on their own, so fills can arrive in parts.
     </p>
@@ -144,7 +144,7 @@
       </tbody>
     </table>
     <p class="hint">
-      Planned average {formatAveragePrice(first.plan.total_quote_minor, first.plan.total_lots)} B per A.
+      Planned average {formatAveragePrice(first.plan.total_quote_minor, first.plan.total_lots)} HF per A.
       {#if refundedLots}{refundedLots} lots refunded by makers who were already filled.{/if}
       {#if first.plan.plan.shortfall}{first.plan.plan.shortfall} lots were beyond your limit.{/if}
       {#if first.changes.length}The book moved after your preview: {first.changes.length} order(s) changed.{/if}
@@ -189,9 +189,9 @@
       <tbody>
         <tr><td>Orders hit</td><td class="num">{plan.plan.fills.length}</td></tr>
         <tr><td>Lots</td><td class="num">{plan.plan.filled}</td></tr>
-        <tr><td>Average price</td><td class="num">{formatAveragePrice(plan.total_quote_minor, plan.total_lots)} B</td></tr>
-        <tr><td>Worst price</td><td class="num">{plan.worst_price === null ? "—" : formatAmount(plan.worst_price)} B</td></tr>
-        <tr><td>Limit (best {plan.reference_price === null ? "—" : formatAmount(plan.reference_price)})</td><td class="num">{formatAmount(plan.limit_price)} B</td></tr>
+        <tr><td>Average price</td><td class="num">{formatAveragePrice(plan.total_quote_minor, plan.total_lots)} HF</td></tr>
+        <tr><td>Worst price</td><td class="num">{plan.worst_price === null ? "—" : formatAmount(plan.worst_price)} HF</td></tr>
+        <tr><td>Limit (best {plan.reference_price === null ? "—" : formatAmount(plan.reference_price)})</td><td class="num">{formatAmount(plan.limit_price)} HF</td></tr>
         <tr class="total"><td>You pay</td><td class="num">{formatAmount(pay(plan.plan.total_cost))} {payAsset}</td></tr>
         <tr><td>You receive if all fill</td><td class="num">{formatAmount(get(plan.plan.total_receives))} {getAsset}</td></tr>
       </tbody>

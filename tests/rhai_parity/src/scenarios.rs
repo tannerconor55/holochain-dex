@@ -27,7 +27,7 @@ fn both(c: Case) -> RhaiRun {
 }
 
 fn paid_to(r: &RhaiRun, who: u8) -> Amounts {
-    r.paid.get(&agent_str(who)).copied().unwrap_or_default()
+    r.paid.get(&agent_str(who)).cloned().unwrap_or_default()
 }
 
 #[test]
@@ -152,10 +152,10 @@ fn wrong_asset_is_refunded_in_full() {
 fn expired_order_refunds_takers_and_keeps_lock_until_release() {
     let terms = OrderTerms { expires_at: NOW, ..alice_sell_100() };
     let lock = terms.initial_lock().unwrap();
-    let r = both(case(terms, lock, vec![park(1, BOB, Amounts::new(0, 4_800), 40, NOW - 1)], RunMode::Fill));
+    let r = both(case(terms, lock.clone(), vec![park(1, BOB, Amounts::new(0, 4_800), 40, NOW - 1)], RunMode::Fill));
     assert_eq!(paid_to(&r, BOB), Amounts::new(0, 4_800), "no fill at or after expiry");
     assert_eq!(r.locked, lock);
-    let release = both(case(terms, lock, vec![], RunMode::Release));
+    let release = both(case(terms, lock.clone(), vec![], RunMode::Release));
     assert_eq!(paid_to(&release, ALICE), lock);
 }
 
@@ -193,7 +193,7 @@ fn input_order_does_not_change_the_result() {
     let mut reversed = parks.clone();
     reversed.reverse();
     let lock = terms.initial_lock().unwrap();
-    let forward = both(case(terms, lock, parks, RunMode::Fill));
+    let forward = both(case(terms, lock.clone(), parks, RunMode::Fill));
     let backward = both(case(terms, lock, reversed, RunMode::Fill));
     assert_eq!(forward.paid, backward.paid);
     assert_eq!(forward.consumed, backward.consumed);

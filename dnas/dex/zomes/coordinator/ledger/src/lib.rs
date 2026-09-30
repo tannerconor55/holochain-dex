@@ -84,7 +84,7 @@ pub fn run_escrow(input: RunEscrowInput) -> ExternResult<Option<RunReport>> {
     my_runs.sort_by_key(|(_, seq, _)| std::cmp::Reverse(*seq));
     let prev_run = my_runs.first().map(|(hash, _, _)| hash.clone());
     let prev_locked = match my_runs.first() {
-        Some((_, _, run)) => run.locked,
+        Some((_, _, run)) => run.locked.clone(),
         None => escrow.terms.initial_lock().map_err(core_err)?,
     };
     let consumed: BTreeSet<ActionHash> = my_runs
@@ -115,7 +115,7 @@ pub fn run_escrow(input: RunEscrowInput) -> ExternResult<Option<RunReport>> {
         mode: input.mode,
         consumed: output.consumed.clone(),
         allocations: output.allocations.clone(),
-        locked: output.locked,
+        locked: output.locked.clone(),
     };
     let run_hash = create_entry(&EntryTypes::SettlementRun(run))?;
     create_link(input.escrow, run_hash.clone(), LinkTypes::EscrowToRuns, ())?;
@@ -161,7 +161,7 @@ pub fn collect_all() -> ExternResult<Vec<ActionHash>> {
             created.push(create_entry(&EntryTypes::Collect(Collect {
                 run: run_hash.clone(),
                 index,
-                amounts: allocation.amounts,
+                amounts: allocation.amounts.clone(),
             }))?);
         }
     }
@@ -188,7 +188,7 @@ pub fn get_escrow_state(escrow: ActionHash) -> ExternResult<EscrowState> {
             unfilled_at_release = Some(entry.terms.remaining_lots(&locked).map_err(core_err)?);
             released_at = Some(r.at);
         }
-        locked = r.run.locked;
+        locked = r.run.locked.clone();
     }
     let remaining_lots = entry.terms.remaining_lots(&locked).map_err(core_err)?;
     let unfilled = unfilled_at_release.unwrap_or(remaining_lots);
@@ -280,10 +280,10 @@ pub fn get_balance() -> ExternResult<BalanceView> {
             .filter(|(_, _, r)| &r.escrow == escrow_hash)
             .max_by_key(|(_, seq, _)| *seq);
         let lock = match latest {
-            Some((_, _, run)) => run.locked,
+            Some((_, _, run)) => run.locked.clone(),
             None => escrow.terms.initial_lock().map_err(core_err)?,
         };
-        locked_in_escrows = add(locked_in_escrows, lock)?;
+        locked_in_escrows = add(&locked_in_escrows, &lock)?;
     }
 
     let mut parked = Amounts::ZERO;
@@ -292,7 +292,7 @@ pub fn get_balance() -> ExternResult<BalanceView> {
             .iter()
             .any(|r| r.run.consumed.contains(park_hash));
         if !consumed {
-            parked = add(parked, park.amounts)?;
+            parked = add(&parked, &park.amounts)?;
         }
     }
 
@@ -301,12 +301,12 @@ pub fn get_balance() -> ExternResult<BalanceView> {
     for (run_hash, run) in incoming_runs(&me)? {
         for (index, allocation) in run.allocations.iter().enumerate() {
             if allocation.receiver == me && !collected.contains(&(run_hash.clone(), index as u32)) {
-                uncollected = add(uncollected, allocation.amounts)?;
+                uncollected = add(&uncollected, &allocation.amounts)?;
             }
         }
     }
 
-    let total = add(add(add(available, locked_in_escrows)?, parked)?, uncollected)?;
+    let total = add(&add(&add(&available, &locked_in_escrows)?, &parked)?, &uncollected)?;
     Ok(BalanceView {
         available,
         locked_in_escrows,
@@ -332,7 +332,7 @@ fn core_err(e: dex_core::CoreError) -> WasmError {
     guest(e.to_string())
 }
 
-fn add(x: Amounts, y: Amounts) -> ExternResult<Amounts> {
+fn add(x: &Amounts, y: &Amounts) -> ExternResult<Amounts> {
     x.checked_add(y).ok_or_else(|| guest("amount overflow"))
 }
 
@@ -426,6 +426,7 @@ fn replay_fill(
                 .ok_or_else(|| guest(format!("previous run {prev} not found")))?
                 .run
                 .locked
+                .clone()
         }
         None => entry.terms.initial_lock().map_err(core_err)?,
     };

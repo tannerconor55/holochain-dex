@@ -18,7 +18,7 @@
       class="level {kind}"
       style="--depth: {(level.lots / maxLots) * 100}%"
       onclick={() => onselect({ take: kind === "ask" ? "Buy" : "Sell", price_per_lot: level.price_per_lot })}
-      aria-label="{kind === 'ask' ? 'Buy from' : 'Sell to'} {level.orders} order(s): {level.lots} A at {formatAmount(level.price_per_lot)} B"
+      aria-label="{kind === 'ask' ? 'Buy from' : 'Sell to'} {level.orders} order(s): {level.lots} A at {formatAmount(level.price_per_lot)} HF"
     >
       <span class="num price">{formatAmount(level.price_per_lot)}</span>
       <span class="num">{level.lots}</span>
@@ -33,7 +33,7 @@
     <p class="muted">Loading the book…</p>
   {:else}
     <div class="head muted">
-      <span>Price (B per A)</span><span class="num">Lots (A)</span><span class="num">Orders</span>
+      <span>Price (HF per A)</span><span class="num">Lots (A)</span><span class="num">Orders</span>
     </div>
     {#if asks.length === 0 && bids.length === 0}
       <p class="muted empty">No open orders. Place one to start the book.</p>
@@ -45,9 +45,9 @@
         {#if store.book.spread === null}
           <span class="muted">Spread —</span>
         {:else if store.book.spread < 0}
-          <span class="warn">Crossed book: best bid is {formatSigned(-store.book.spread)} B above best ask</span>
+          <span class="warn">Crossed book: best bid is {formatSigned(-store.book.spread)} HF above best ask</span>
         {:else}
-          <span>Spread <span class="num">{formatSigned(store.book.spread)}</span> B</span>
+          <span>Spread <span class="num">{formatSigned(store.book.spread)}</span> HF</span>
         {/if}
       </div>
       <ol class="side" aria-label="Bids: buyers of A">

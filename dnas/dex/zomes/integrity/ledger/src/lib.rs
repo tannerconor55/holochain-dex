@@ -40,7 +40,7 @@ use dex_core::{execute_run, CoreError, ParkInput, RunInput, MAX_MINT, MAX_PARKS_
 use hdi::prelude::*;
 use std::collections::BTreeSet;
 
-pub use dex_core::{Allocation, Amounts, Asset, OrderTerms, RunMode, Side, LOT_SIZE_A};
+pub use dex_core::{Allocation, Amounts, OrderTerms, RunMode, Side, LOT_SIZE_A};
 
 // ---------------------------------------------------------------------------
 // Entry types
@@ -185,7 +185,7 @@ fn validate_create(entry: EntryTypes, action: &CreateAction) -> ExternResult<Val
 fn validate_mint(mint: &Mint) -> ExternResult<ValidateCallbackResult> {
     ensure!(!mint.amounts.is_zero(), "mint must create something");
     ensure!(
-        mint.amounts.a <= MAX_MINT && mint.amounts.b <= MAX_MINT,
+        mint.amounts.units().all(|(_, amount)| amount <= MAX_MINT),
         "mint exceeds the per-mint cap of {MAX_MINT}"
     );
     valid()
@@ -200,7 +200,7 @@ fn validate_escrow(escrow: &Escrow, action: &CreateAction) -> ExternResult<Valid
         "escrow must expire after it is created"
     );
     let lock = escrow.terms.initial_lock().map_err(core_err)?;
-    validate_debit(action, lock)
+    validate_debit(action, &lock)
 }
 
 fn validate_park(park: &Park, action: &CreateAction) -> ExternResult<ValidateCallbackResult> {
@@ -211,7 +211,7 @@ fn validate_park(park: &Park, action: &CreateAction) -> ExternResult<ValidateCal
         matches!(decode_record(&escrow_record)?, Some(EntryTypes::Escrow(_))),
         "park must reference an escrow"
     );
-    validate_debit(action, park.amounts)
+    validate_debit(action, &park.amounts)
 }
 
 fn validate_run(run: &SettlementRun, action: &CreateAction) -> ExternResult<ValidateCallbackResult> {
@@ -245,7 +245,7 @@ fn validate_run(run: &SettlementRun, action: &CreateAction) -> ExternResult<Vali
         "prev_run must be the maker's latest run for this escrow"
     );
     let prev_locked = match latest {
-        Some((_, _, prev)) => prev.locked,
+        Some((_, _, prev)) => prev.locked.clone(),
         None => escrow.terms.initial_lock().map_err(core_err)?,
     };
     let already_consumed: BTreeSet<&ActionHash> = earlier_runs
@@ -320,11 +320,11 @@ fn validate_collect(collect: &Collect, action: &CreateAction) -> ExternResult<Va
     valid()
 }
 
-fn validate_debit(action: &CreateAction, debit: Amounts) -> ExternResult<ValidateCallbackResult> {
+fn validate_debit(action: &CreateAction, debit: &Amounts) -> ExternResult<ValidateCallbackResult> {
     let history = walk_chain(action.author(), &prev_action(action)?)?;
     let available = history.available().map_err(core_err)?;
     ensure!(
-        available.covers(&debit),
+        available.covers(debit),
         "insufficient balance: available {available:?}, required {debit:?}"
     );
     valid()
@@ -415,19 +415,19 @@ impl ChainLedger {
     pub fn available(&self) -> Result<Amounts, CoreError> {
         let mut credits = Amounts::ZERO;
         for m in &self.mints {
-            credits = credits.checked_add(m.amounts).ok_or(CoreError::Overflow)?;
+            credits = credits.checked_add(&m.amounts).ok_or(CoreError::Overflow)?;
         }
         for c in &self.collects {
-            credits = credits.checked_add(c.amounts).ok_or(CoreError::Overflow)?;
+            credits = credits.checked_add(&c.amounts).ok_or(CoreError::Overflow)?;
         }
         let mut debits = Amounts::ZERO;
         for (_, e) in &self.escrows {
-            debits = debits.checked_add(e.terms.initial_lock()?).ok_or(CoreError::Overflow)?;
+            debits = debits.checked_add(&e.terms.initial_lock()?).ok_or(CoreError::Overflow)?;
         }
         for (_, p) in &self.parks {
-            debits = debits.checked_add(p.amounts).ok_or(CoreError::Overflow)?;
+            debits = debits.checked_add(&p.amounts).ok_or(CoreError::Overflow)?;
         }
-        credits.checked_sub(debits).ok_or(CoreError::Overflow)
+        credits.checked_sub(&debits).ok_or(CoreError::Overflow)
     }
 
     pub fn push(&mut self, hash: ActionHash, seq: u32, entry: EntryTypes) {

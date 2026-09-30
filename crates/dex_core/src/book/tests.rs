@@ -207,7 +207,7 @@ fn plan_costs_match_what_a_settlement_run_charges() {
         parks: vec![crate::ParkInput {
             id: 7u32,
             taker: BOB,
-            amounts: plan.fills[0].cost,
+            amounts: plan.fills[0].cost.clone(),
             requested_lots: plan.fills[0].lots,
             parked_at: NOW,
         }],
@@ -216,7 +216,7 @@ fn plan_costs_match_what_a_settlement_run_charges() {
     })
     .unwrap();
     assert_eq!(out.filled_lots, 40);
-    let bob_gets = out.allocations.iter().find(|a| a.receiver == BOB).unwrap().amounts;
+    let bob_gets = out.allocations.iter().find(|a| a.receiver == BOB).unwrap().amounts.clone();
     assert_eq!(bob_gets, plan.fills[0].receives, "no refund: the cost was exact");
 }
 

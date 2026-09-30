@@ -104,18 +104,24 @@ pub fn minor(s: &str) -> u64 {
 }
 
 /// A unit map with no zero amounts (a zero on a monetary unit is invalid).
-pub fn unit_map_json(a: Amounts) -> Value {
+pub fn unit_map_json(a: &Amounts) -> Value {
     let mut m = serde_json::Map::new();
-    if a.a > 0 {
-        m.insert(UNIT_A.into(), fmt(a.a).into());
-    }
-    if a.b > 0 {
-        m.insert(UNIT_B.into(), fmt(a.b).into());
+    for (unit, amount) in a.units() {
+        m.insert(unyt_index(unit).into(), fmt(amount).into());
     }
     Value::Object(m)
 }
 
-fn unit_map(a: Amounts) -> UnitMap {
+/// dex_core's unit ids as the template's Unyt unit indexes.
+fn unyt_index(unit: &str) -> &'static str {
+    match unit {
+        dex_core::UNIT_A => UNIT_A,
+        dex_core::HUB_UNIT => UNIT_B,
+        other => panic!("no Unyt index for unit {other}"),
+    }
+}
+
+fn unit_map(a: &Amounts) -> UnitMap {
     serde_json::from_value(unit_map_json(a)).expect("unit map")
 }
 
@@ -124,11 +130,12 @@ pub fn amounts_of(map: &UnitMap) -> Amounts {
     let mut out = Amounts::ZERO;
     for (unit, amount) in v.as_object().expect("unit map is an object") {
         let n = minor(amount.as_str().expect("amount is a string"));
-        match unit.as_str() {
-            UNIT_A => out.a += n,
-            UNIT_B => out.b += n,
+        let id = match unit.as_str() {
+            UNIT_A => dex_core::UNIT_A,
+            UNIT_B => dex_core::HUB_UNIT,
             other => panic!("unexpected unit {other}"),
-        }
+        };
+        out = out.checked_add(&Amounts::of(id, n)).expect("no overflow");
     }
     out
 }
@@ -140,7 +147,7 @@ pub fn amounts_of(map: &UnitMap) -> Amounts {
 fn parked_spend_record(role: &str, author: AgentPubKey, timestamp: i64, amount: Amounts, requested: Option<u64>) -> Record {
     let tag = rmp_serde::to_vec_named(&ParkedSpendData {
         ct_role_id: role.to_string(),
-        amount: unit_map(amount),
+        amount: unit_map(&amount),
         fee: UnitMap::new(),
         payload: requested.map_or(Value::Null, |n| json!({ "requested_lots": n })),
         global_definition: hash(0x55, 0),
@@ -196,7 +203,7 @@ fn install_host(case: &Case) {
     for p in &case.parks {
         records.insert(
             hash(0x11, p.id),
-            parked_spend_record("taker_spender", agent(p.taker), p.parked_at, p.amounts, Some(p.requested_lots)),
+            parked_spend_record("taker_spender", agent(p.taker), p.parked_at, p.amounts.clone(), Some(p.requested_lots)),
         );
     }
     let mut mock = MockHdkT::new();
@@ -227,7 +234,7 @@ fn previous_output(case: &Case) -> Option<Value> {
     match &case.start {
         Start::Opening => None,
         Start::Locked(lock) => {
-            let output = RAVEOutput::try_from(json!({ "locked": unit_map_json(*lock) })).expect("RAVEOutput");
+            let output = RAVEOutput::try_from(json!({ "locked": unit_map_json(lock) })).expect("RAVEOutput");
             Some(serde_json::to_value(output).expect("serialize RAVEOutput"))
         }
         Start::Chained(output) => Some(serde_json::to_value(output).expect("serialize RAVEOutput")),
@@ -243,7 +250,7 @@ pub fn input_json(case: &Case) -> Value {
         consumed.insert(
             "maker_spender_allocations".into(),
             RAVEInputStdPayload::Vec(vec![linked(
-                json!({ "amount": unit_map_json(lock), "source": ActionHashB64::from(id.clone()).to_string() }),
+                json!({ "amount": unit_map_json(&lock), "source": ActionHashB64::from(id.clone()).to_string() }),
                 &id,
             )]),
         );
@@ -253,7 +260,7 @@ pub fn input_json(case: &Case) -> Value {
         .iter()
         .map(|p| {
             let h = hash(0x11, p.id);
-            linked(json!({ "amount": unit_map_json(p.amounts), "source": park_id(p.id) }), &h)
+            linked(json!({ "amount": unit_map_json(&p.amounts), "source": park_id(p.id) }), &h)
         })
         .collect();
     let requests = case
@@ -349,7 +356,7 @@ pub fn run_rhai(case: &Case) -> Result<RhaiRun, String> {
 pub fn prev_locked(case: &Case) -> Amounts {
     match &case.start {
         Start::Opening => case.terms.initial_lock().expect("valid terms"),
-        Start::Locked(lock) => *lock,
+        Start::Locked(lock) => lock.clone(),
         Start::Chained(output) => output.locked.as_ref().map(amounts_of).unwrap_or(Amounts::ZERO),
     }
 }
@@ -363,7 +370,7 @@ pub fn run_core(case: &Case) -> (Result<RunOutput<String, String>, CoreError>, V
         .map(|p| ParkInput {
             id: park_id(p.id),
             taker: agent_str(p.taker),
-            amounts: p.amounts,
+            amounts: p.amounts.clone(),
             requested_lots: p.requested_lots,
             parked_at: p.parked_at,
         })
@@ -397,7 +404,7 @@ pub fn assert_parity(case: &Case) -> Option<RhaiRun> {
         (Err(e), Ok(c)) => panic!("Rhai refused but dex_core ran: {e}\ncore: {c:?}\ncase: {case:?}"),
         (Ok(r), Ok(c)) => {
             let core_paid: BTreeMap<String, Amounts> =
-                c.allocations.iter().map(|a| (a.receiver.clone(), a.amounts)).collect();
+                c.allocations.iter().map(|a| (a.receiver.clone(), a.amounts.clone())).collect();
             assert_eq!(r.paid, core_paid, "allocations differ\ncase: {case:?}");
             assert_eq!(r.locked, c.locked, "locked differs\ncase: {case:?}");
             assert_eq!(r.consumed, c.consumed, "consumed order differs\ncase: {case:?}");
@@ -418,11 +425,11 @@ pub fn assert_conserves(case: &Case, r: &RhaiRun) {
     let mut inflow = prev_locked(case);
     for id in &r.consumed {
         let p = case.parks.iter().find(|p| &park_id(p.id) == id).expect("consumed park exists");
-        inflow = inflow.checked_add(p.amounts).unwrap();
+        inflow = inflow.checked_add(&p.amounts).unwrap();
     }
-    let mut outflow = r.locked;
+    let mut outflow = r.locked.clone();
     for a in r.paid.values() {
-        outflow = outflow.checked_add(*a).unwrap();
+        outflow = outflow.checked_add(a).unwrap();
     }
     assert_eq!(inflow, outflow, "conservation per unit\ncase: {case:?}");
 }
@@ -446,8 +453,8 @@ pub fn assert_names_sources(case: &Case, r: &RhaiRun) {
         assert!(named.contains(&lock_source), "the opening spend is not named");
     }
     let in_maker_unit = |x: Amounts| match case.terms.side {
-        Side::Sell => x.a,
-        Side::Buy => x.b,
+        Side::Sell => x.get(dex_core::UNIT_A),
+        Side::Buy => x.get(dex_core::HUB_UNIT),
     };
     for a in &allocations {
         let paid = in_maker_unit(amounts_of(&a.amounts));
@@ -457,7 +464,7 @@ pub fn assert_names_sources(case: &Case, r: &RhaiRun) {
             .iter()
             .filter(|p| a.sources.iter().any(|s| s.to_string() == park_id(p.id)))
             .filter(|p| agent_str(p.taker) == a.receiver.to_string())
-            .map(|p| in_maker_unit(p.amounts))
+            .map(|p| in_maker_unit(p.amounts.clone()))
             .sum();
         if paid > own_refund {
             assert!(
