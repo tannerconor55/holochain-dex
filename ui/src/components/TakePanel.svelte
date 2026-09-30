@@ -1,7 +1,8 @@
 <script lang="ts">
-  import { amt, b64, HUB, sameHash, shortHash, UNIT_A, type Side, type TakePlan, type TakeResult } from "../lib/api";
+  import { amt, b64, sameHash, shortHash, type Side, type TakePlan, type TakeResult } from "../lib/api";
   import { message, type DexStore } from "../lib/dex.svelte";
-  import { formatAmount, parseAmount, parseLots } from "../lib/format";
+  import { parseAmount, parseLots } from "../lib/format";
+  import PresenceCheck from "./PresenceCheck.svelte";
 
   let {
     store,
@@ -14,24 +15,29 @@
   let plan = $state<TakePlan | null>(null);
   let planError = $state<string | null>(null);
   let result = $state<TakeResult | null>(null);
+  let makersOk = $state(false);
 
   // A new selection resets the panel, with the level's price as the limit.
   $effect(() => {
-    limit = formatAmount(selection.price_per_lot);
+    limit = store.fmt(selection.price_per_lot, store.quote);
     quantity = "";
     result = null;
   });
 
   let buying = $derived(selection.take === "Buy");
-  let payAsset = $derived(buying ? HUB : UNIT_A);
-  let getAsset = $derived(buying ? UNIT_A : HUB);
+  let base = $derived(store.base);
+  let quote = $derived(store.quote);
+  let payAsset = $derived(buying ? quote : base);
+  let getAsset = $derived(buying ? base : quote);
   let lots = $derived(parseLots(quantity));
-  let limitPrice = $derived(parseAmount(limit));
+  let limitPrice = $derived(parseAmount(limit, store.decimals(quote)));
 
   // Preview the plan, debounced; a late response for an old input is dropped.
   let seq = 0;
   $effect(() => {
-    const request = lots !== null && limitPrice !== null ? { take: selection.take, lots, limit_price: limitPrice } : null;
+    const market = store.marketId;
+    const request =
+      lots !== null && limitPrice !== null ? { market, take: selection.take, lots, limit_price: limitPrice } : null;
     const mine = ++seq;
     plan = null;
     planError = null;
@@ -51,14 +57,15 @@
     if (!plan) return "Enter a quantity to see what you would take.";
     if (plan.filled === 0) return "Nothing to take at or better than your limit (your own orders are skipped).";
     if (available !== null && cost > available) {
-      return `This costs ${formatAmount(cost)} ${payAsset}; you have ${formatAmount(available)} ${payAsset} available.`;
+      return `This costs ${store.fmt(cost, payAsset)} ${payAsset}; you have ${store.fmt(available, payAsset)} ${payAsset} available.`;
     }
     return null;
   });
+  let orders = $derived(plan?.fills.map((f) => f.order) ?? []);
 
   async function confirm() {
-    if (lots === null || limitPrice === null || blocked) return;
-    const request = { take: selection.take, lots, limit_price: limitPrice };
+    if (lots === null || limitPrice === null || blocked || !makersOk) return;
+    const request = { market: store.marketId, take: selection.take, lots, limit_price: limitPrice };
     const taken = await store.write("Taking", () => store.api.take(request));
     if (taken) {
       result = taken;
@@ -68,6 +75,7 @@
 
   function parkState(park: Uint8Array): string {
     const status = store.parks?.find((p) => sameHash(p.park, park));
+    if (status?.reclaimed) return "reclaimed";
     if (!status?.settlement) return "waiting for the maker";
     return status.settlement.filled_lots === 0 ? "refunded" : `filled ${status.settlement.filled_lots} lots`;
   }
@@ -75,13 +83,13 @@
 
 <section class="panel" aria-labelledby="take-h">
   <div class="title">
-    <h2 id="take-h">{buying ? "Buy" : "Sell"} A at {formatAmount(selection.price_per_lot)} HF or better</h2>
+    <h2 id="take-h">{buying ? "Buy" : "Sell"} {base} at {store.fmt(selection.price_per_lot, quote)} {quote} or better</h2>
     <button onclick={onclose} aria-label="Close the take panel">Close</button>
   </div>
 
   {#if result}
     <p>
-      Parked {formatAmount(amt(result.plan.total_cost, payAsset))} {payAsset} across
+      Parked {store.fmt(amt(result.plan.total_cost, payAsset), payAsset)} {payAsset} across
       {result.parks.length} order(s). Each maker settles automatically while their app is open.
     </p>
     <table>
@@ -95,8 +103,8 @@
     <button onclick={() => (result = null)}>Take more</button>
   {:else}
     <div class="fields">
-      <label>Quantity (A) <input inputmode="numeric" class="num" bind:value={quantity} /></label>
-      <label>Limit (B per A) <input inputmode="decimal" class="num" bind:value={limit} /></label>
+      <label>Quantity ({store.quantityUnit}) <input inputmode="numeric" class="num" bind:value={quantity} /></label>
+      <label>Limit ({quote} per {base}) <input inputmode="decimal" class="num" bind:value={limit} /></label>
     </div>
     {#if planError}<p class="warn">Could not plan: {planError}</p>{/if}
     {#if plan && plan.fills.length}
@@ -108,30 +116,30 @@
           {#each plan.fills as f (b64(f.order))}
             <tr>
               <td>…{shortHash(f.order)}</td>
-              <td class="num">{formatAmount(f.price_per_lot)}</td>
+              <td class="num">{store.fmt(f.price_per_lot, quote)}</td>
               <td class="num">{f.lots}</td>
-              <td class="num">{formatAmount(amt(f.cost, payAsset))} {payAsset}</td>
+              <td class="num">{store.fmt(amt(f.cost, payAsset), payAsset)} {payAsset}</td>
             </tr>
           {/each}
           <tr class="total">
             <td>Total</td>
             <td></td>
             <td class="num">{plan.filled}</td>
-            <td class="num">{formatAmount(cost)} {payAsset}</td>
+            <td class="num">{store.fmt(cost, payAsset)} {payAsset}</td>
           </tr>
         </tbody>
       </table>
       <p class="hint">
-        You receive {formatAmount(amt(plan.total_receives, getAsset))}
+        You receive {store.fmt(amt(plan.total_receives, getAsset), getAsset)}
         {getAsset} if every maker fills. Anything a maker cannot fill is refunded.
       </p>
     {/if}
     {#if plan && plan.shortfall > 0 && plan.filled > 0}
       <p class="warn">Only {plan.filled} of {lots} lots are available at this limit.</p>
     {/if}
-    {#if blocked}<p class="hint">{blocked}</p>{/if}
-    <button class="primary" onclick={confirm} disabled={blocked !== null}>
-      Park {plan ? formatAmount(cost) : ""} {payAsset}
+    {#if blocked}<p class="hint">{blocked}</p>{:else}<PresenceCheck {store} {orders} bind:ok={makersOk} />{/if}
+    <button class="primary" onclick={confirm} disabled={blocked !== null || !makersOk}>
+      Park {plan ? store.fmt(cost, payAsset) : ""} {payAsset}
     </button>
   {/if}
 </section>

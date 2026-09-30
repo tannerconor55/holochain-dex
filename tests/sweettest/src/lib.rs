@@ -111,7 +111,7 @@ impl TestEnv {
     }
 
     async fn book(&self, agent: usize) -> BookView {
-        self.dex(agent, "get_order_book", ()).await
+        self.dex(agent, "get_order_book", None::<dex_core::MarketId>).await
     }
 
     /// Σ `BalanceView.total` over every agent. Must equal what was minted.
@@ -148,6 +148,11 @@ fn demo_market() -> dex_core::MarketId {
 }
 
 /// Open an escrow in the demo market through the ledger directly.
+/// Place an order in the default market.
+fn place(terms: OrderTerms) -> dex_api::PlaceOrderRequest {
+    dex_api::PlaceOrderRequest { market: None, terms }
+}
+
 fn open(terms: OrderTerms) -> ledger_api::OpenEscrowRequest {
     ledger_api::OpenEscrowRequest { market: demo_market(), terms }
 }
@@ -369,7 +374,7 @@ fn sell(lots: u64, price_per_lot: u64) -> OrderTerms {
 async fn placed_order_shows_in_the_book_until_cancelled() {
     let env = TestEnv::new(2).await;
     let _: ActionHash = env.call(ALICE, "mint", Amounts::new(10_000, 0)).await;
-    let escrow: ActionHash = env.dex(ALICE, "place_order", sell_100_at_1_20()).await;
+    let escrow: ActionHash = env.dex(ALICE, "place_order", place(sell_100_at_1_20())).await;
     env.sync().await;
 
     let book = env.book(BOB).await;
@@ -454,12 +459,13 @@ async fn take_across_two_orders_is_settled_by_each_maker() {
     let _: ActionHash = env.call(BOB, "mint", Amounts::new(0, 20_000)).await;
     let minted = Amounts::new(7_500, 20_000);
 
-    let alice_order: ActionHash = env.dex(ALICE, "place_order", sell(40, 120)).await;
-    let carol_order: ActionHash = env.dex(CAROL, "place_order", sell(35, 121)).await;
+    let alice_order: ActionHash = env.dex(ALICE, "place_order", place(sell(40, 120))).await;
+    let carol_order: ActionHash = env.dex(CAROL, "place_order", place(sell(35, 121))).await;
     env.sync().await;
     assert_eq!(env.book(BOB).await.asks, vec![level(120, 40, 1), level(121, 35, 1)]);
 
     let request = TakeRequest {
+        market: None,
         take: Side::Buy,
         lots: 60,
         limit_price: None,
@@ -541,10 +547,10 @@ async fn orders_leave_the_book_when_filled_or_expired() {
     let _: ActionHash = env.call(BOB, "mint", Amounts::new(0, 10_000)).await;
     let minted = Amounts::new(2_000, 10_000);
 
-    let lasting: ActionHash = env.dex(ALICE, "place_order", sell(10, 120)).await;
+    let lasting: ActionHash = env.dex(ALICE, "place_order", place(sell(10, 120))).await;
     let expires_at = Timestamp::now().as_micros() + 30_000_000;
     let short: ActionHash = env
-        .dex(ALICE, "place_order", OrderTerms { expires_at, ..sell(10, 130) })
+        .dex(ALICE, "place_order", place(OrderTerms { expires_at, ..sell(10, 130) }))
         .await;
     env.sync().await;
     assert_eq!(env.book(BOB).await.asks, vec![level(120, 10, 1), level(130, 10, 1)]);
@@ -559,7 +565,7 @@ async fn orders_leave_the_book_when_filled_or_expired() {
 
     // Full fill.
     let _: TakeResult = env
-        .dex(BOB, "take", TakeRequest { take: Side::Buy, lots: 10, limit_price: Some(120) })
+        .dex(BOB, "take", TakeRequest { market: None, take: Side::Buy, lots: 10, limit_price: Some(120) })
         .await;
     env.sync().await;
     let reports: Vec<RunReport> = env.dex(ALICE, "run_my_orders", ()).await;
@@ -614,7 +620,7 @@ async fn orders_at_one_price_fill_in_time_priority() {
 
     let mut ids = Vec::new();
     for maker in [ALICE, BOB, CAROL] {
-        ids.push(env.dex::<_, ActionHash>(maker, "place_order", sell(10, 120)).await);
+        ids.push(env.dex::<_, ActionHash>(maker, "place_order", place(sell(10, 120))).await);
         env.sync().await;
     }
     assert_eq!(env.book(ALICE).await.asks, vec![level(120, 30, 3)]);
@@ -622,7 +628,7 @@ async fn orders_at_one_price_fill_in_time_priority() {
         .dex::<_, Vec<dex_api::Order>>(
             ALICE,
             "get_level_orders",
-            dex_api::LevelQuery { side: Side::Sell, price_per_lot: 120 },
+            dex_api::LevelQuery { market: None, side: Side::Sell, price_per_lot: 120 },
         )
         .await
         .into_iter()
@@ -631,7 +637,7 @@ async fn orders_at_one_price_fill_in_time_priority() {
     assert_eq!(at_level, ids, "oldest first");
 
     let taken: TakeResult = env
-        .dex(CAROL, "take", TakeRequest { take: Side::Buy, lots: 15, limit_price: None })
+        .dex(CAROL, "take", TakeRequest { market: None, take: Side::Buy, lots: 15, limit_price: None })
         .await;
     let planned: Vec<(ActionHash, u64)> = taken.parks.iter().map(|p| (p.escrow.clone(), p.lots)).collect();
     assert_eq!(planned, vec![(ids[0].clone(), 10), (ids[1].clone(), 5)], "Carol skips her own order");
@@ -655,8 +661,8 @@ async fn more_parks_than_one_run_takes_settle_in_one_call() {
     let _: ActionHash = env.call(ALICE, "mint", Amounts::new(20_000, 0)).await;
     let _: ActionHash = env.call(BOB, "mint", Amounts::new(0, 60_000)).await;
     let minted = Amounts::new(20_000, 60_000);
-    let to_fill: ActionHash = env.dex(ALICE, "place_order", sell(100, 120)).await;
-    let to_cancel: ActionHash = env.dex(ALICE, "place_order", sell(100, 125)).await;
+    let to_fill: ActionHash = env.dex(ALICE, "place_order", place(sell(100, 120))).await;
+    let to_cancel: ActionHash = env.dex(ALICE, "place_order", place(sell(100, 125))).await;
     env.sync().await;
 
     for _ in 0..21 {
@@ -733,11 +739,11 @@ async fn a_park_signals_the_maker_and_the_run_signals_the_taker() {
     let mut bob_signals = env.signals(BOB);
     let _: ActionHash = env.call(ALICE, "mint", Amounts::new(4_000, 0)).await;
     let _: ActionHash = env.call(BOB, "mint", Amounts::new(0, 4_800)).await;
-    let order: ActionHash = env.dex(ALICE, "place_order", sell(40, 120)).await;
+    let order: ActionHash = env.dex(ALICE, "place_order", place(sell(40, 120))).await;
     env.sync().await;
 
     let taken: TakeResult = env
-        .dex(BOB, "take", TakeRequest { take: Side::Buy, lots: 40, limit_price: None })
+        .dex(BOB, "take", TakeRequest { market: None, take: Side::Buy, lots: 40, limit_price: None })
         .await;
     let park = taken.parks[0].park.clone();
 
@@ -777,6 +783,7 @@ use dex_api::{MarketBudgetRequest, MarketOrderRequest, MarketResult, MarketRetry
 
 fn market(side: Side, lots: u64) -> MarketOrderRequest {
     MarketOrderRequest {
+        market: None,
         side,
         lots,
         max_slippage_bps: Some(200),
@@ -809,8 +816,8 @@ async fn market_buy_sweeps_two_levels_from_two_makers() {
     let _: ActionHash = env.call(CAROL, "mint", Amounts::new(3_500, 0)).await;
     let _: ActionHash = env.call(BOB, "mint", Amounts::new(0, 20_000)).await;
     let minted = Amounts::new(7_500, 20_000);
-    let alice_order: ActionHash = env.dex(ALICE, "place_order", sell(40, 120)).await;
-    let carol_order: ActionHash = env.dex(CAROL, "place_order", sell(35, 121)).await;
+    let alice_order: ActionHash = env.dex(ALICE, "place_order", place(sell(40, 120))).await;
+    let carol_order: ActionHash = env.dex(CAROL, "place_order", place(sell(35, 121))).await;
     env.sync().await;
 
     let result: MarketResult = env.dex(BOB, "market_order", market(Side::Buy, 60)).await;
@@ -845,8 +852,8 @@ async fn slippage_limit_leaves_a_far_level_untouched() {
     let _: ActionHash = env.call(CAROL, "mint", Amounts::new(5_000, 0)).await;
     let _: ActionHash = env.call(BOB, "mint", Amounts::new(0, 10_000)).await;
     let minted = Amounts::new(6_000, 10_000);
-    let near: ActionHash = env.dex(ALICE, "place_order", sell(10, 100)).await;
-    let far: ActionHash = env.dex(CAROL, "place_order", sell(50, 110)).await;
+    let near: ActionHash = env.dex(ALICE, "place_order", place(sell(10, 100))).await;
+    let far: ActionHash = env.dex(CAROL, "place_order", place(sell(50, 110))).await;
     env.sync().await;
 
     // Lots: 30 wanted, only the 10 at 1.00 are within 2% (limit 1.02).
@@ -855,6 +862,7 @@ async fn slippage_limit_leaves_a_far_level_untouched() {
             BOB,
             "preview_market_order",
             dex_api::MarketPreviewRequest {
+                market: None,
                 side: Side::Buy,
                 amount: dex_api::MarketAmount::Lots(30),
                 max_slippage_bps: None,
@@ -870,6 +878,7 @@ async fn slippage_limit_leaves_a_far_level_untouched() {
             BOB,
             "market_order_by_budget",
             MarketBudgetRequest {
+                market: None,
                 side: Side::Buy,
                 budget: 3_000,
                 max_slippage_bps: Some(200),
@@ -903,14 +912,14 @@ async fn a_raced_market_order_is_refunded_and_retried_within_its_original_limit(
     let _: ActionHash = env.call(BOB, "mint", Amounts::new(0, 10_000)).await;
     let _: ActionHash = env.call(DAVE, "mint", Amounts::new(0, 5_000)).await;
     let minted = Amounts::new(3_500, 15_000);
-    let best: ActionHash = env.dex(ALICE, "place_order", sell(10, 120)).await;
-    let next: ActionHash = env.dex(CAROL, "place_order", sell(15, 121)).await;
-    let beyond: ActionHash = env.dex(CAROL, "place_order", sell(10, 124)).await;
+    let best: ActionHash = env.dex(ALICE, "place_order", place(sell(10, 120))).await;
+    let next: ActionHash = env.dex(CAROL, "place_order", place(sell(15, 121))).await;
+    let beyond: ActionHash = env.dex(CAROL, "place_order", place(sell(10, 124))).await;
     env.sync().await;
 
     // Dave takes the whole best level first.
     let _: TakeResult = env
-        .dex(DAVE, "take", TakeRequest { take: Side::Buy, lots: 10, limit_price: Some(120) })
+        .dex(DAVE, "take", TakeRequest { market: None, take: Side::Buy, lots: 10, limit_price: Some(120) })
         .await;
     env.sync().await;
     // Bob's market buy still sees it (parks do not change remaining lots).
@@ -959,8 +968,8 @@ async fn market_sell_sweeps_bids() {
     let _: ActionHash = env.call(CAROL, "mint", Amounts::new(0, 1_180)).await;
     let _: ActionHash = env.call(BOB, "mint", Amounts::new(1_500, 0)).await;
     let minted = Amounts::new(1_500, 2_380);
-    let high: ActionHash = env.dex(ALICE, "place_order", buy(10, 120)).await;
-    let low: ActionHash = env.dex(CAROL, "place_order", buy(10, 118)).await;
+    let high: ActionHash = env.dex(ALICE, "place_order", place(buy(10, 120))).await;
+    let low: ActionHash = env.dex(CAROL, "place_order", place(buy(10, 118))).await;
     env.sync().await;
 
     let result: MarketResult = env.dex(BOB, "market_order", market(Side::Sell, 15)).await;

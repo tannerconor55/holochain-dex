@@ -48,9 +48,37 @@ export function amounts(entries: [UnitId, number][]): Amounts {
   return Object.fromEntries(entries.filter(([, n]) => n > 0));
 }
 
+/** dex_core::MarketId: 64 lowercase hex characters. */
+export type MarketId = string;
+
+/** dex_core::MarketDef */
+export interface MarketDef {
+  base: UnitId;
+  quote: UnitId;
+  /** Base minor units per lot. */
+  lot_size: number;
+  /** Prices are multiples of this, in quote minor units per lot. */
+  tick_size: number;
+}
+
+export interface MarketInfo {
+  id: MarketId;
+  def: MarketDef;
+  base_decimals: number;
+  quote_decimals: number;
+}
+
+/** dex_api::DexConfig */
+export interface DexConfig {
+  park_timeout_secs: number;
+  settle_grace_secs: number;
+  /** The first is the default market. */
+  markets: MarketInfo[];
+}
+
 export interface OrderTerms {
   side: Side;
-  /** HF minor units per lot (one lot = 1.00 A). */
+  /** Quote (HF) minor units per lot. */
   price_per_lot: number;
   lots: number;
   /** Microseconds since the epoch. */
@@ -60,8 +88,7 @@ export interface OrderTerms {
 export interface EscrowState {
   escrow: ActionHash;
   maker: AgentPubKey;
-  /** The market id: 64 hex characters (dex_core::MarketId). */
-  market: string;
+  market: MarketId;
   terms: OrderTerms;
   opened_at: number;
   locked: Amounts;
@@ -155,6 +182,7 @@ export interface TakePlan {
 }
 
 export interface TakeRequest {
+  market: MarketId | null;
   take: Side;
   lots: number;
   limit_price: number | null;
@@ -197,6 +225,7 @@ export interface FillChange {
 }
 
 export interface MarketResult {
+  market: MarketId;
   plan: MarketPlan;
   parks: { escrow: ActionHash; park: ActionHash; lots: number }[];
   changes: FillChange[];
@@ -208,6 +237,14 @@ export interface MarketRetry {
   unfilled_lots: number;
   still_pending: number;
   result: MarketResult | null;
+}
+
+/** dex_api::MakerPresence. Advisory: proves nothing about later. */
+export interface MakerPresence {
+  order: ActionHash;
+  maker: AgentPubKey;
+  reachable: boolean;
+  detail: string | null;
 }
 
 export type DexSignal =
@@ -244,25 +281,36 @@ export class DexApi {
   collectAll = () => this.call<ActionHash[]>("ledger", "collect_all");
   reclaimPark = (park: ActionHash) => this.call<ActionHash>("ledger", "reclaim_park", park);
 
-  // dex: book
-  book = () => this.call<BookView>("dex", "get_order_book");
-  levelOrders = (side: Side, price_per_lot: number) =>
-    this.call<Order[]>("dex", "get_level_orders", { side, price_per_lot });
+  // dex: markets and the book. `market: null` is the first declared market.
+  config = () => this.call<DexConfig>("dex", "get_config");
+  book = (market: MarketId | null) => this.call<BookView>("dex", "get_order_book", market);
+  levelOrders = (market: MarketId | null, side: Side, price_per_lot: number) =>
+    this.call<Order[]>("dex", "get_level_orders", { market, side, price_per_lot });
   planTake = (request: TakeRequest) => this.call<TakePlan>("dex", "plan_take", request);
+  /** Ping the makers of `orders` (all at once; up to ~60 s if one is offline). */
+  checkMakers = (orders: ActionHash[]) => this.call<MakerPresence[]>("dex", "check_makers", orders);
 
   // dex: writes
-  placeOrder = (terms: OrderTerms) => this.call<ActionHash>("dex", "place_order", terms);
+  placeOrder = (market: MarketId | null, terms: OrderTerms) =>
+    this.call<ActionHash>("dex", "place_order", { market, terms });
   take = (request: TakeRequest) => this.call<TakeResult>("dex", "take", request);
   cancelOrder = (escrow: ActionHash) => this.call<RunReport[]>("dex", "cancel_order", escrow);
   runMyOrders = () => this.call<RunReport[]>("dex", "run_my_orders");
 
   // dex: market orders (taker-only, immediate-or-cancel)
-  previewMarket = (side: Side, amount: MarketAmount, max_slippage_bps: number | null) =>
-    this.call<MarketPlan>("dex", "preview_market_order", { side, amount, max_slippage_bps });
-  marketOrder = (side: Side, amount: MarketAmount, max_slippage_bps: number | null, expected: MarketPlan | null) =>
+  previewMarket = (market: MarketId | null, side: Side, amount: MarketAmount, max_slippage_bps: number | null) =>
+    this.call<MarketPlan>("dex", "preview_market_order", { market, side, amount, max_slippage_bps });
+  marketOrder = (
+    market: MarketId | null,
+    side: Side,
+    amount: MarketAmount,
+    max_slippage_bps: number | null,
+    expected: MarketPlan | null,
+  ) =>
     "Lots" in amount
-      ? this.call<MarketResult>("dex", "market_order", { side, lots: amount.Lots, max_slippage_bps, expected })
+      ? this.call<MarketResult>("dex", "market_order", { market, side, lots: amount.Lots, max_slippage_bps, expected })
       : this.call<MarketResult>("dex", "market_order_by_budget", {
+          market,
           side,
           budget: amount.Budget,
           max_slippage_bps,

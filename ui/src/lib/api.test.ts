@@ -31,14 +31,18 @@ describe("DexApi", () => {
     const { client, calls } = stubClient();
     const api = new DexApi(client);
     await api.mint({ A: 10_000 });
-    await api.book();
-    await api.levelOrders("Sell", 120);
+    await api.book(null);
+    await api.levelOrders(null, "Sell", 120);
     await api.runMyOrders();
+    await api.reclaimPark(hash(7));
+    await api.checkMakers([hash(8)]);
     expect(calls).toEqual([
       { role_name: "dex", zome_name: "ledger", fn_name: "mint", payload: { A: 10_000 } },
       { role_name: "dex", zome_name: "dex", fn_name: "get_order_book", payload: null },
-      { role_name: "dex", zome_name: "dex", fn_name: "get_level_orders", payload: { side: "Sell", price_per_lot: 120 } },
+      { role_name: "dex", zome_name: "dex", fn_name: "get_level_orders", payload: { market: null, side: "Sell", price_per_lot: 120 } },
       { role_name: "dex", zome_name: "dex", fn_name: "run_my_orders", payload: null },
+      { role_name: "dex", zome_name: "ledger", fn_name: "reclaim_park", payload: hash(7) },
+      { role_name: "dex", zome_name: "dex", fn_name: "check_makers", payload: [hash(8)] },
     ]);
   });
 
@@ -46,24 +50,25 @@ describe("DexApi", () => {
     const { client, calls } = stubClient();
     const api = new DexApi(client);
     const terms = { side: "Sell" as const, price_per_lot: 120, lots: 100, expires_at: 1 };
-    await api.placeOrder(terms);
-    await api.take({ take: "Buy", lots: 40, limit_price: null });
+    const market = "ab".repeat(32);
+    await api.placeOrder(market, terms);
+    await api.take({ market: null, take: "Buy", lots: 40, limit_price: null });
     expect(calls.map((c) => [c.fn_name, c.payload])).toEqual([
-      ["place_order", terms],
-      ["take", { take: "Buy", lots: 40, limit_price: null }],
+      ["place_order", { market, terms }],
+      ["take", { market: null, take: "Buy", lots: 40, limit_price: null }],
     ]);
   });
 
   it("routes market orders by amount kind and passes the slippage and preview", async () => {
     const { client, calls } = stubClient();
     const api = new DexApi(client);
-    await api.previewMarket("Buy", { Lots: 10 }, 200);
-    await api.marketOrder("Buy", { Lots: 10 }, 200, null);
-    await api.marketOrder("Sell", { Budget: 5_000 }, null, null);
+    await api.previewMarket(null, "Buy", { Lots: 10 }, 200);
+    await api.marketOrder(null, "Buy", { Lots: 10 }, 200, null);
+    await api.marketOrder(null, "Sell", { Budget: 5_000 }, null, null);
     expect(calls.map((c) => [c.fn_name, c.payload])).toEqual([
-      ["preview_market_order", { side: "Buy", amount: { Lots: 10 }, max_slippage_bps: 200 }],
-      ["market_order", { side: "Buy", lots: 10, max_slippage_bps: 200, expected: null }],
-      ["market_order_by_budget", { side: "Sell", budget: 5_000, max_slippage_bps: null, expected: null }],
+      ["preview_market_order", { market: null, side: "Buy", amount: { Lots: 10 }, max_slippage_bps: 200 }],
+      ["market_order", { market: null, side: "Buy", lots: 10, max_slippage_bps: 200, expected: null }],
+      ["market_order_by_budget", { market: null, side: "Sell", budget: 5_000, max_slippage_bps: null, expected: null }],
     ]);
   });
 

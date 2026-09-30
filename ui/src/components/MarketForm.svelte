@@ -1,7 +1,8 @@
 <script lang="ts">
-  import { amt, b64, sameHash, shortHash, HUB, UNIT_A, type Amounts, type MarketAmount, type MarketPlan, type MarketResult, type Side } from "../lib/api";
+  import { amt, b64, sameHash, shortHash, type Amounts, type MarketAmount, type MarketPlan, type MarketResult, type Side } from "../lib/api";
   import { message, type DexStore } from "../lib/dex.svelte";
-  import { formatAmount, formatAveragePrice, parseAmount, parseBps, parseLots } from "../lib/format";
+  import { formatAveragePrice, parseAmount, parseBps, parseLots } from "../lib/format";
+  import PresenceCheck from "./PresenceCheck.svelte";
 
   let { store }: { store: DexStore } = $props();
 
@@ -16,10 +17,16 @@
   /** The order and, once used, its one retry. */
   let results = $state<MarketResult[]>([]);
   let retryNote = $state<string | null>(null);
+  let makersOk = $state(false);
 
   let buying = $derived(side === "Buy");
-  let payAsset = $derived(buying ? HUB : UNIT_A);
-  let getAsset = $derived(buying ? UNIT_A : HUB);
+  let base = $derived(store.base);
+  let quote = $derived(store.quote);
+  let payAsset = $derived(buying ? quote : base);
+  let getAsset = $derived(buying ? base : quote);
+  let money = (minor: number, unit: string) => store.fmt(minor, unit);
+  let price = (minor: number) => store.fmt(minor, quote);
+  let average = (p: MarketPlan) => formatAveragePrice(p.total_quote_minor, p.total_lots, 4, store.decimals(quote));
   let pay = (x: Amounts) => amt(x, payAsset);
   let get = (x: Amounts) => amt(x, getAsset);
 
@@ -29,27 +36,27 @@
       const lots = parseLots(quantity);
       return lots === null ? null : { Lots: lots };
     }
-    const b = parseAmount(budget);
+    const b = parseAmount(budget, store.decimals(payAsset));
     return b === null || b === 0 ? null : { Budget: b };
   });
   let inputError = $derived.by(() => {
     if (bps === null) return "Slippage is a percentage with at most two decimals, e.g. 2 or 0.5.";
     if (!buying && bps > 10_000) return "A sell cannot allow more than 100% slippage.";
-    if (!amount) return by === "lots" ? "Enter a whole number of A." : `Enter a budget in ${payAsset}.`;
+    if (!amount) return by === "lots" ? `Enter a whole number of ${base}.` : `Enter a budget in ${payAsset}.`;
     return null;
   });
 
   // Debounced preview; a late response for an old input is dropped.
   let seq = 0;
   $effect(() => {
-    const request = !inputError && amount && bps !== null ? { side, amount, bps } : null;
+    const request = !inputError && amount && bps !== null ? { market: store.marketId, side, amount, bps } : null;
     const mine = ++seq;
     plan = null;
     planError = null;
     if (!request) return;
     const timer = setTimeout(() => {
       store.api
-        .previewMarket(request.side, request.amount, request.bps)
+        .previewMarket(request.market, request.side, request.amount, request.bps)
         .then((p) => mine === seq && (plan = p))
         .catch((e) => mine === seq && (planError = message(e)));
     }, 300);
@@ -63,17 +70,18 @@
     if (!plan) return "Previewing…";
     if (plan.plan.filled === 0) return "Nothing within your slippage limit.";
     if (available !== null && pay(plan.plan.total_cost) > available) {
-      return `This costs ${formatAmount(pay(plan.plan.total_cost))} ${payAsset}; you have ${formatAmount(available)} ${payAsset} available.`;
+      return `This costs ${money(pay(plan.plan.total_cost), payAsset)} ${payAsset}; you have ${money(available, payAsset)} ${payAsset} available.`;
     }
     return null;
   });
+  let orders = $derived(plan?.plan.fills.map((f) => f.order) ?? []);
 
   async function confirm() {
-    if (blocked || !plan || !amount || bps === null) return;
+    if (blocked || !makersOk || !plan || !amount || bps === null) return;
     const expected = $state.snapshot(plan) as MarketPlan;
-    const request = { side, amount, bps };
+    const request = { market: store.marketId, side, amount, bps };
     const done = await store.write("Market order", () =>
-      store.api.marketOrder(request.side, request.amount, request.bps, expected),
+      store.api.marketOrder(request.market, request.side, request.amount, request.bps, expected),
     );
     if (done) {
       results = [done];
@@ -104,15 +112,15 @@
     const snapshot = $state.snapshot(original) as MarketResult;
     const r = await store.write("Retrying remainder", () => store.api.retryMarketShortfall(snapshot));
     if (!r) return;
-    const limit = formatAmount(original.plan.limit_price);
+    const limit = price(original.plan.limit_price);
     if (!r.result) {
       retryNote = "Nothing left to retry.";
     } else {
       // Either way this was the one retry: keep it so the button goes away.
       results = [...results, r.result];
       retryNote = r.result.parks.length
-        ? `Retried ${r.unfilled_lots} lots within the original limit ${limit} HF.`
-        : `Nothing is on the book within the original limit ${limit} HF; ${r.unfilled_lots} lots stay unfilled.`;
+        ? `Retried ${r.unfilled_lots} lots within the original limit ${limit} ${quote}.`
+        : `Nothing is on the book within the original limit ${limit} ${quote}; ${r.unfilled_lots} lots stay unfilled.`;
     }
     await store.refresh();
   }
@@ -122,7 +130,7 @@
   {@const first = results[0]!}
   <div class="result" aria-live="polite">
     <p>
-      <strong>Market {side === "Buy" ? "buy" : "sell"}</strong> within {formatAmount(first.plan.limit_price)} HF:
+      <strong>Market {side === "Buy" ? "buy" : "sell"}</strong> within {price(first.plan.limit_price)} {quote}:
       filled <strong class="num">{filledLots}</strong> lots so far{waiting ? `, ${waiting} park(s) waiting for makers` : ""}.
       Each maker settles on their own, so fills can arrive in parts.
     </p>
@@ -135,7 +143,7 @@
             {@const fill = r.plan.plan.fills.find((f) => sameHash(f.order, p.escrow))}
             <tr>
               <td>…{shortHash(p.escrow)}{i ? " (retry)" : ""}</td>
-              <td class="num">{fill ? formatAmount(fill.price_per_lot) : ""}</td>
+              <td class="num">{fill ? price(fill.price_per_lot) : ""}</td>
               <td class="num">{p.lots}</td>
               <td>{!s ? "waiting" : s.filled_lots === p.lots ? "filled" : s.filled_lots === 0 ? "refunded" : `filled ${s.filled_lots}, rest refunded`}</td>
             </tr>
@@ -144,7 +152,7 @@
       </tbody>
     </table>
     <p class="hint">
-      Planned average {formatAveragePrice(first.plan.total_quote_minor, first.plan.total_lots)} HF per A.
+      Planned average {average(first.plan)} {quote} per {base}.
       {#if refundedLots}{refundedLots} lots refunded by makers who were already filled.{/if}
       {#if first.plan.plan.shortfall}{first.plan.plan.shortfall} lots were beyond your limit.{/if}
       {#if first.changes.length}The book moved after your preview: {first.changes.length} order(s) changed.{/if}
@@ -164,7 +172,7 @@
     {#each ["Buy", "Sell"] as const as s (s)}
       <label class="side" class:selected={side === s}>
         <input type="radio" name="market-side" value={s} bind:group={side} />
-        {s} A now
+        {s} {base} now
       </label>
     {/each}
   </div>
@@ -172,12 +180,12 @@
     <label>
       Amount in
       <select bind:value={by}>
-        <option value="lots">A (lots)</option>
+        <option value="lots">{base} (lots)</option>
         <option value="budget">{payAsset} (budget)</option>
       </select>
     </label>
     {#if by === "lots"}
-      <label>Quantity (A) <input inputmode="numeric" class="num" bind:value={quantity} /></label>
+      <label>Quantity ({store.quantityUnit}) <input inputmode="numeric" class="num" bind:value={quantity} /></label>
     {:else}
       <label>Budget ({payAsset}) <input inputmode="decimal" class="num" bind:value={budget} /></label>
     {/if}
@@ -189,24 +197,25 @@
       <tbody>
         <tr><td>Orders hit</td><td class="num">{plan.plan.fills.length}</td></tr>
         <tr><td>Lots</td><td class="num">{plan.plan.filled}</td></tr>
-        <tr><td>Average price</td><td class="num">{formatAveragePrice(plan.total_quote_minor, plan.total_lots)} HF</td></tr>
-        <tr><td>Worst price</td><td class="num">{plan.worst_price === null ? "—" : formatAmount(plan.worst_price)} HF</td></tr>
-        <tr><td>Limit (best {plan.reference_price === null ? "—" : formatAmount(plan.reference_price)})</td><td class="num">{formatAmount(plan.limit_price)} HF</td></tr>
-        <tr class="total"><td>You pay</td><td class="num">{formatAmount(pay(plan.plan.total_cost))} {payAsset}</td></tr>
-        <tr><td>You receive if all fill</td><td class="num">{formatAmount(get(plan.plan.total_receives))} {getAsset}</td></tr>
+        <tr><td>Average price</td><td class="num">{average(plan)} {quote}</td></tr>
+        <tr><td>Worst price</td><td class="num">{plan.worst_price === null ? "—" : price(plan.worst_price)} {quote}</td></tr>
+        <tr><td>Limit (best {plan.reference_price === null ? "—" : price(plan.reference_price)})</td><td class="num">{price(plan.limit_price)} {quote}</td></tr>
+        <tr class="total"><td>You pay</td><td class="num">{money(pay(plan.plan.total_cost), payAsset)} {payAsset}</td></tr>
+        <tr><td>You receive if all fill</td><td class="num">{money(get(plan.plan.total_receives), getAsset)} {getAsset}</td></tr>
       </tbody>
     </table>
     {#if plan.plan.shortfall > 0}
       <p class="warn">Only {plan.plan.filled} of {plan.plan.filled + plan.plan.shortfall} lots are within {slippage}% of the best price. The rest is not taken.</p>
     {/if}
     {#if plan.unspent_budget}
-      <p class="hint">{formatAmount(plan.unspent_budget)} {payAsset} of the budget stays unspent (whole lots only, within the limit).</p>
+      <p class="hint">{money(plan.unspent_budget, payAsset)} {payAsset} of the budget stays unspent (whole lots only, within the limit).</p>
     {/if}
   {/if}
   {#if blocked && blocked !== "Previewing…"}<p class="warn">{blocked}</p>{/if}
+  {#if !blocked}<PresenceCheck {store} {orders} bind:ok={makersOk} />{/if}
   <p class="hint">Immediate-or-cancel: never rests on the book. Unfilled parts are refunded by the makers.</p>
-  <button class="primary" onclick={confirm} disabled={blocked !== null}>
-    Market {buying ? "buy" : "sell"} {plan?.plan.filled ?? ""} A
+  <button class="primary" onclick={confirm} disabled={blocked !== null || !makersOk}>
+    Market {buying ? "buy" : "sell"} {plan?.plan.filled ?? ""} {base}
   </button>
 {/if}
 

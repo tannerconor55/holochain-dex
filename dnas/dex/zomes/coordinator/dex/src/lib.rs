@@ -11,9 +11,10 @@
 //! in `dex_core::book`.
 
 use dex_api::{
-    BookView, DexSignal, FillChange, LevelQuery, MarketAmount, MarketBudgetRequest, MarketOrderRequest,
-    MarketPlan, MarketPreviewRequest, MarketResult, MarketRetry, MyOrder, Order, PlacedPark,
-    RawListing, RetryMarketRequest, TakePlan, TakeRequest, TakeResult, DEFAULT_MAX_SLIPPAGE_BPS,
+    BookView, DexConfig, DexSignal, FillChange, LevelQuery, MakerPresence, MarketAmount, MarketBudgetRequest,
+    MarketInfo, MarketOrderRequest, MarketPlan, MarketPreviewRequest, MarketResult, MarketRetry, MyOrder,
+    Order, PlaceOrderRequest, PlacedPark, RawListing, RetryMarketRequest, TakePlan, TakeRequest,
+    TakeResult, DEFAULT_MAX_SLIPPAGE_BPS,
 };
 use dex_core::book;
 use dex_core::listing::{decode_tag, encode_tag};
@@ -22,10 +23,10 @@ use dex_core::{MarketDef, MarketId};
 use dex_integrity::{load_properties, market_anchor, LinkTypes};
 use hdk::prelude::*;
 use ledger_api::{
-    EscrowState, OpenEscrowRequest, OrderTerms, ParkRequest, ParkStatus, PendingPark, RunEscrowInput, RunMode, Side,
+    EscrowState, OpenEscrowRequest, ParkRequest, ParkStatus, PendingPark, RunEscrowInput, RunMode, Side,
     RunReport,
 };
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 const LEDGER: &str = "ledger";
 
@@ -37,16 +38,19 @@ const MAX_RUNS_PER_CALL: usize = 10;
 // Signals
 // ---------------------------------------------------------------------------
 
-/// Let other agents send this cell remote signals, and nothing else.
+/// Let other agents send this cell remote signals and ping it, and nothing
+/// else. One grant per function, so each can be revoked alone.
 #[hdk_extern]
 pub fn init() -> ExternResult<InitCallbackResult> {
-    let mut functions = HashSet::new();
-    functions.insert((zome_info()?.name, FunctionName::from("recv_remote_signal")));
-    create_cap_grant(CapGrantEntry {
-        tag: "remote_signals".into(),
-        access: CapAccess::Unrestricted,
-        functions: GrantedFunctions::Listed(functions),
-    })?;
+    for (tag, function) in [("remote_signals", "recv_remote_signal"), ("presence", "ping")] {
+        let mut functions = HashSet::new();
+        functions.insert((zome_info()?.name, FunctionName::from(function)));
+        create_cap_grant(CapGrantEntry {
+            tag: tag.into(),
+            access: CapAccess::Unrestricted,
+            functions: GrantedFunctions::Listed(functions),
+        })?;
+    }
     Ok(InitCallbackResult::Pass)
 }
 
@@ -66,14 +70,115 @@ fn notify(signal: DexSignal, agents: Vec<AgentPubKey>) -> ExternResult<()> {
 }
 
 // ---------------------------------------------------------------------------
+// Maker presence (advisory)
+// ---------------------------------------------------------------------------
+
+/// Answers any agent: proof this cell is online right now. Reads nothing.
+#[hdk_extern]
+pub fn ping() -> ExternResult<()> {
+    Ok(())
+}
+
+/// Ping the makers of `orders`, all at once, before a taker parks against
+/// them. A park against an offline maker waits for them until its deadline;
+/// this lets the UI warn first. Advisory: it proves nothing, and takes still
+/// work without it. An unreachable maker costs up to the network request
+/// timeout (60 s by default); pings run concurrently, so that is the most
+/// this call waits.
+#[hdk_extern]
+pub fn check_makers(orders: Vec<ActionHash>) -> ExternResult<Vec<MakerPresence>> {
+    let mut makers = BTreeMap::new();
+    for order in &orders {
+        let state: EscrowState = ledger("get_escrow_state", order.clone())?;
+        makers.insert(order.clone(), state.maker);
+    }
+    let me = my_key()?;
+    let distinct: Vec<AgentPubKey> = makers
+        .values()
+        .filter(|m| **m != me)
+        .cloned()
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    let zome = zome_info()?.name;
+    let calls = distinct
+        .iter()
+        .map(|agent| {
+            Ok(Call::new(
+                CallTarget::NetworkAgent(agent.clone()),
+                zome.clone(),
+                FunctionName::from("ping"),
+                None,
+                ExternIO::encode(()).map_err(|e| wasm_error!(e))?,
+            ))
+        })
+        .collect::<ExternResult<Vec<_>>>()?;
+    let responses = HDK.with(|h| h.borrow().call(calls))?;
+    let mut seen = BTreeMap::new();
+    for (agent, response) in distinct.into_iter().zip(responses) {
+        seen.insert(agent, ping_outcome(response));
+    }
+    Ok(orders
+        .into_iter()
+        .filter_map(|order| {
+            let maker = makers.get(&order)?.clone();
+            // Your own order: you are online by definition.
+            let detail = seen.get(&maker).cloned().unwrap_or(None);
+            Some(MakerPresence { order, reachable: detail.is_none(), maker, detail })
+        })
+        .collect())
+}
+
+/// `None` if the ping answered, else why not.
+fn ping_outcome(response: ZomeCallResponse) -> Option<String> {
+    match response {
+        ZomeCallResponse::Ok(_) => None,
+        ZomeCallResponse::NetworkError(e) => Some(format!("not reachable: {e}")),
+        ZomeCallResponse::Unauthorized(..) => Some("reachable but refused the ping (older app version?)".into()),
+        ZomeCallResponse::AuthenticationFailed(..) => Some("authentication failed".into()),
+        ZomeCallResponse::CountersigningSession(e) => Some(format!("busy in a countersigning session: {e}")),
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Listing
 // ---------------------------------------------------------------------------
+
+/// The DNA's park timing and every market it declares.
+#[hdk_extern]
+pub fn get_config() -> ExternResult<DexConfig> {
+    let props = props()?;
+    let markets = props
+        .markets
+        .iter()
+        .map(|def| {
+            let decimals = |unit: &str| {
+                props
+                    .unit(unit)
+                    .map(|u| u.decimals)
+                    .ok_or_else(|| guest(format!("market unit {unit} is not declared")))
+            };
+            Ok(MarketInfo {
+                id: def.id(),
+                def: def.clone(),
+                base_decimals: decimals(&def.base)?,
+                quote_decimals: decimals(&def.quote)?,
+            })
+        })
+        .collect::<ExternResult<Vec<_>>>()?;
+    Ok(DexConfig {
+        park_timeout_secs: props.park_timeout_secs,
+        settle_grace_secs: props.settle_grace_secs,
+        markets,
+    })
+}
 
 /// Open an order's escrow and list it in the book. Returns the escrow hash,
 /// which is the order's identity.
 #[hdk_extern]
-pub fn place_order(terms: OrderTerms) -> ExternResult<ActionHash> {
-    let (market, _) = default_market()?;
+pub fn place_order(request: PlaceOrderRequest) -> ExternResult<ActionHash> {
+    let (market, _) = market(request.market)?;
+    let terms = request.terms;
     let escrow: ActionHash = ledger("open_escrow", OpenEscrowRequest { market, terms })?;
     list(escrow.clone(), &market, encode_tag(&market, &terms))?;
     Ok(escrow)
@@ -107,16 +212,18 @@ fn props() -> ExternResult<DexProperties> {
     load_properties()?.map_err(guest)
 }
 
-/// The market this zome trades in: the first the DNA properties declare. The
-/// UI's market selector (milestone 2 step 4) will pass one explicitly.
-fn default_market() -> ExternResult<(MarketId, MarketDef)> {
+/// `id`'s market, or the first the DNA properties declare when `None`.
+fn market(id: Option<MarketId>) -> ExternResult<(MarketId, MarketDef)> {
     let props = props()?;
-    let market = props
-        .markets
-        .first()
-        .cloned()
-        .ok_or_else(|| guest("the DNA properties declare no market"))?;
-    Ok((market.id(), market))
+    let def = match id {
+        Some(id) => props.market(&id).cloned().map_err(|e| guest(e.to_string()))?,
+        None => props
+            .markets
+            .first()
+            .cloned()
+            .ok_or_else(|| guest("the DNA properties declare no market"))?,
+    };
+    Ok((def.id(), def))
 }
 
 // ---------------------------------------------------------------------------
@@ -124,40 +231,41 @@ fn default_market() -> ExternResult<(MarketId, MarketDef)> {
 // ---------------------------------------------------------------------------
 
 #[hdk_extern]
-pub fn get_order_book() -> ExternResult<BookView> {
+pub fn get_order_book(market_id: Option<MarketId>) -> ExternResult<BookView> {
     let now = now()?;
-    Ok(book::aggregate(&load_orders(now)?, now))
+    let (id, _) = market(market_id)?;
+    Ok(book::aggregate(&load_orders(&id, now)?, now))
 }
 
 /// The orders at one price level, in time priority.
 #[hdk_extern]
 pub fn get_level_orders(query: LevelQuery) -> ExternResult<Vec<Order>> {
     let now = now()?;
-    Ok(book::orders_at_level(&load_orders(now)?, query.side, query.price_per_lot, now))
+    let (id, _) = market(query.market)?;
+    Ok(book::orders_at_level(&load_orders(&id, now)?, query.side, query.price_per_lot, now))
 }
 
 /// Preview a take. Read-only.
 #[hdk_extern]
 pub fn plan_take(request: TakeRequest) -> ExternResult<TakePlan<ActionHash>> {
     let now = now()?;
-    plan(&request, &load_orders(now)?, now)
+    let (id, def) = market(request.market)?;
+    plan(&request, &def, &load_orders(&id, now)?, now)
 }
 
-fn plan(request: &TakeRequest, orders: &[Order], now: i64) -> ExternResult<TakePlan<ActionHash>> {
-    book::plan_take(orders, &default_market()?.1, &my_key()?, request.take, request.lots, request.limit_price, now)
-        .map_err(core_err)
+fn plan(request: &TakeRequest, def: &MarketDef, orders: &[Order], now: i64) -> ExternResult<TakePlan<ActionHash>> {
+    book::plan_take(orders, def, &my_key()?, request.take, request.lots, request.limit_price, now).map_err(core_err)
 }
 
-/// Every live listed order.
+/// Every live listed order in `market`.
 ///
 /// Cost: one `get_links`, then one ledger state read per listing that is not
 /// already expired by its tag (N+1). Fine at MVP scale; a cache or a
 /// maker-published summary would go here. Orders whose state cannot be read
 /// yet (not gossiped) are left out rather than failing the whole book.
-fn load_orders(now: i64) -> ExternResult<Vec<Order>> {
-    let (market, _) = default_market()?;
+fn load_orders(market: &MarketId, now: i64) -> ExternResult<Vec<Order>> {
     let links = get_links(
-        LinkQuery::try_new(market_anchor(&market)?, LinkTypes::MarketToOrders)?,
+        LinkQuery::try_new(market_anchor(market)?, LinkTypes::MarketToOrders)?,
         GetStrategy::Network,
     )?;
     let mut seen = BTreeSet::new();
@@ -170,7 +278,7 @@ fn load_orders(now: i64) -> ExternResult<Vec<Order>> {
             continue; // the same escrow listed twice
         }
         match decode_tag(&link.tag.0) {
-            Some(tag) if tag.market == market && now < tag.expires_at => {}
+            Some(tag) if &tag.market == market && now < tag.expires_at => {}
             _ => continue,
         }
         let Ok(state) = ledger::<_, EscrowState>("get_escrow_state", escrow) else {
@@ -206,8 +314,9 @@ fn order_view(state: EscrowState) -> Order {
 #[hdk_extern]
 pub fn take(request: TakeRequest) -> ExternResult<TakeResult> {
     let now = now()?;
-    let orders = load_orders(now)?;
-    let plan = plan(&request, &orders, now)?;
+    let (id, def) = market(request.market)?;
+    let orders = load_orders(&id, now)?;
+    let plan = plan(&request, &def, &orders, now)?;
     let parks = park_plan(&plan, &orders)?;
     Ok(TakeResult { plan, parks })
 }
@@ -260,12 +369,14 @@ fn park_plan(plan: &TakePlan<ActionHash>, orders: &[Order]) -> ExternResult<Vec<
 #[hdk_extern]
 pub fn preview_market_order(request: MarketPreviewRequest) -> ExternResult<MarketPlan<ActionHash>> {
     let now = now()?;
-    market_plan(request.side, request.amount, request.max_slippage_bps, &load_orders(now)?, now)
+    let (id, def) = market(request.market)?;
+    market_plan(&def, request.side, request.amount, request.max_slippage_bps, &load_orders(&id, now)?, now)
 }
 
 #[hdk_extern]
 pub fn market_order(request: MarketOrderRequest) -> ExternResult<MarketResult> {
     execute_market(
+        request.market,
         request.side,
         MarketAmount::Lots(request.lots),
         request.max_slippage_bps,
@@ -276,6 +387,7 @@ pub fn market_order(request: MarketOrderRequest) -> ExternResult<MarketResult> {
 #[hdk_extern]
 pub fn market_order_by_budget(request: MarketBudgetRequest) -> ExternResult<MarketResult> {
     execute_market(
+        request.market,
         request.side,
         MarketAmount::Budget(request.budget),
         request.max_slippage_bps,
@@ -311,10 +423,11 @@ pub fn retry_market_shortfall(request: RetryMarketRequest) -> ExternResult<Marke
         });
     }
     let now = now()?;
-    let orders = load_orders(now)?;
+    let (id, def) = market(Some(original.market))?;
+    let orders = load_orders(&id, now)?;
     let plan = book::market::plan_with_limit(
         &orders,
-        &default_market()?.1,
+        &def,
         original.plan.take,
         unfilled,
         original.plan.limit_price,
@@ -327,6 +440,7 @@ pub fn retry_market_shortfall(request: RetryMarketRequest) -> ExternResult<Marke
         unfilled_lots: unfilled,
         still_pending,
         result: Some(MarketResult {
+            market: id,
             plan,
             parks,
             changes: Vec::new(),
@@ -336,6 +450,7 @@ pub fn retry_market_shortfall(request: RetryMarketRequest) -> ExternResult<Marke
 }
 
 fn market_plan(
+    market: &MarketDef,
     side: Side,
     amount: MarketAmount,
     max_slippage_bps: Option<u32>,
@@ -344,10 +459,9 @@ fn market_plan(
 ) -> ExternResult<MarketPlan<ActionHash>> {
     let bps = max_slippage_bps.unwrap_or(DEFAULT_MAX_SLIPPAGE_BPS);
     let me = my_key()?;
-    let (_, market) = default_market()?;
     match amount {
-        MarketAmount::Lots(lots) => book::plan_market(orders, &market, side, lots, bps, &me, now),
-        MarketAmount::Budget(budget) => book::plan_market_by_budget(orders, &market, side, budget, bps, &me, now),
+        MarketAmount::Lots(lots) => book::plan_market(orders, market, side, lots, bps, &me, now),
+        MarketAmount::Budget(budget) => book::plan_market_by_budget(orders, market, side, budget, bps, &me, now),
     }
     .map_err(market_err)
 }
@@ -355,17 +469,20 @@ fn market_plan(
 /// Plan from one fresh read and park in the same call, so nothing can change
 /// between the two; `expected` (the confirmed preview) is what may differ.
 fn execute_market(
+    market_id: Option<MarketId>,
     side: Side,
     amount: MarketAmount,
     max_slippage_bps: Option<u32>,
     expected: Option<&MarketPlan<ActionHash>>,
 ) -> ExternResult<MarketResult> {
     let now = now()?;
-    let orders = load_orders(now)?;
-    let plan = market_plan(side, amount, max_slippage_bps, &orders, now)?;
+    let (id, def) = market(market_id)?;
+    let orders = load_orders(&id, now)?;
+    let plan = market_plan(&def, side, amount, max_slippage_bps, &orders, now)?;
     let parks = park_plan(&plan.plan, &orders)?;
     let changes = expected.map(|e| fill_changes(&e.plan, &plan.plan)).unwrap_or_default();
     Ok(MarketResult {
+        market: id,
         plan,
         parks,
         changes,

@@ -1,7 +1,7 @@
 <script lang="ts">
   import type { PriceLevel, Side } from "../lib/api";
   import type { DexStore } from "../lib/dex.svelte";
-  import { formatAmount, formatSigned } from "../lib/format";
+  import { formatSigned } from "../lib/format";
 
   let { store, onselect }: { store: DexStore; onselect: (s: { take: Side; price_per_lot: number }) => void } =
     $props();
@@ -9,6 +9,10 @@
   // Asks run from the highest price down to the spread; bids from the spread down.
   let asks = $derived(store.book ? [...store.book.asks].reverse() : []);
   let bids = $derived(store.book?.bids ?? []);
+  let base = $derived(store.base);
+  let quote = $derived(store.quote);
+  let price = (minor: number) => store.fmt(minor, quote);
+  let signed = (minor: number) => formatSigned(minor, store.decimals(quote));
   let maxLots = $derived(Math.max(1, ...asks.map((l) => l.lots), ...bids.map((l) => l.lots)));
 </script>
 
@@ -18,9 +22,9 @@
       class="level {kind}"
       style="--depth: {(level.lots / maxLots) * 100}%"
       onclick={() => onselect({ take: kind === "ask" ? "Buy" : "Sell", price_per_lot: level.price_per_lot })}
-      aria-label="{kind === 'ask' ? 'Buy from' : 'Sell to'} {level.orders} order(s): {level.lots} A at {formatAmount(level.price_per_lot)} HF"
+      aria-label="{kind === 'ask' ? 'Buy from' : 'Sell to'} {level.orders} order(s): {level.lots} {base} at {price(level.price_per_lot)} {quote}"
     >
-      <span class="num price">{formatAmount(level.price_per_lot)}</span>
+      <span class="num price">{price(level.price_per_lot)}</span>
       <span class="num">{level.lots}</span>
       <span class="num muted">{level.orders}</span>
     </button>
@@ -33,24 +37,24 @@
     <p class="muted">Loading the book…</p>
   {:else}
     <div class="head muted">
-      <span>Price (HF per A)</span><span class="num">Lots (A)</span><span class="num">Orders</span>
+      <span>Price ({quote} per {base})</span><span class="num">Lots ({base})</span><span class="num">Orders</span>
     </div>
     {#if asks.length === 0 && bids.length === 0}
       <p class="muted empty">No open orders. Place one to start the book.</p>
     {:else}
-      <ol class="side" aria-label="Asks: sellers of A">
+      <ol class="side" aria-label="Asks: sellers of {base}">
         {#each asks as level (level.price_per_lot)}{@render row(level, "ask")}{/each}
       </ol>
       <div class="spread" role="status">
         {#if store.book.spread === null}
           <span class="muted">Spread —</span>
         {:else if store.book.spread < 0}
-          <span class="warn">Crossed book: best bid is {formatSigned(-store.book.spread)} HF above best ask</span>
+          <span class="warn">Crossed book: best bid is {signed(-store.book.spread)} {quote} above best ask</span>
         {:else}
-          <span>Spread <span class="num">{formatSigned(store.book.spread)}</span> HF</span>
+          <span>Spread <span class="num">{signed(store.book.spread)}</span> {quote}</span>
         {/if}
       </div>
-      <ol class="side" aria-label="Bids: buyers of A">
+      <ol class="side" aria-label="Bids: buyers of {base}">
         {#each bids as level (level.price_per_lot)}{@render row(level, "bid")}{/each}
       </ol>
     {/if}

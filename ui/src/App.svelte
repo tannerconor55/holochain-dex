@@ -25,7 +25,22 @@
 </script>
 
 <header>
-  <h1>A / HF</h1>
+  <h1>{store ? `${store.base} / ${store.quote}` : "DEX"}</h1>
+  {#if store && (store.config?.markets.length ?? 0) > 1}
+    <!-- Hidden until the DNA declares a second market. -->
+    <label class="market">
+      Market
+      <select
+        value={store.marketId}
+        onchange={(e) => {
+          selection = null;
+          store?.selectMarket(e.currentTarget.value);
+        }}
+      >
+        {#each store.config?.markets ?? [] as m (m.id)}<option value={m.id}>{m.def.base} / {m.def.quote}</option>{/each}
+      </select>
+    </label>
+  {/if}
   {#if store}
     <span class="muted agent" title="Your agent key">agent …{shortHash(store.api.me)}</span>
     {#if store.pending.length}
@@ -82,6 +97,15 @@
   h1 {
     font-size: 1.1rem;
     margin: 0;
+  }
+  .market {
+    display: flex;
+    flex-direction: row;
+    align-items: baseline;
+    gap: 0.4rem;
+  }
+  .market select {
+    width: auto;
   }
   .agent {
     font-family: ui-monospace, monospace;

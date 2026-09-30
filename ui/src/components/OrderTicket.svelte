@@ -1,7 +1,7 @@
 <script lang="ts">
-  import { amt, HUB, UNIT_A, type Side } from "../lib/api";
+  import { amt, type Side } from "../lib/api";
   import type { DexStore } from "../lib/dex.svelte";
-  import { formatAmount, nowMicros, parseAmount, parseLots } from "../lib/format";
+  import { nowMicros, parseAmount, parseLots } from "../lib/format";
   import MarketForm from "./MarketForm.svelte";
 
   let { store }: { store: DexStore } = $props();
@@ -19,18 +19,33 @@
   let quantity = $state("100");
   let expiry = $state(2);
 
+  let base = $derived(store.base);
+  let quote = $derived(store.quote);
+  let lotSize = $derived(store.market?.def.lot_size ?? 100);
+  let tick = $derived(store.market?.def.tick_size ?? 1);
+
   /** The lock the maker commits, in the asset they deliver. */
   let ticket = $derived.by(() => {
-    const pricePerLot = parseAmount(price);
+    const decimals = store.decimals(quote);
+    const pricePerLot = parseAmount(price, decimals);
     const lots = parseLots(quantity);
-    if (pricePerLot === null || pricePerLot === 0) return { reason: "Enter a price above 0 with at most two decimals." };
-    if (lots === null) return { reason: "Enter a whole number of A (1 lot = 1.00 A)." };
-    const lock = side === "Sell" ? lots * 100 : lots * pricePerLot;
-    const asset = side === "Sell" ? UNIT_A : HUB;
+    if (pricePerLot === null || pricePerLot === 0) {
+      return { reason: `Enter a price above 0 with at most ${decimals} decimals.` };
+    }
+    if (pricePerLot % tick !== 0) {
+      return { reason: `The price must be a multiple of the tick size, ${store.fmt(tick, quote)} ${quote}.` };
+    }
+    if (lots === null) return { reason: `Enter a whole number of lots (1 lot = ${store.fmt(lotSize, base)} ${base}).` };
+    const lock = side === "Sell" ? lots * lotSize : lots * pricePerLot;
+    const asset = side === "Sell" ? base : quote;
     if (!Number.isSafeInteger(lock)) return { reason: "That order is too large." };
     const available = store.balance ? amt(store.balance.available, asset) : null;
     if (available !== null && lock > available) {
-      return { reason: `You lock ${formatAmount(lock)} ${asset} but have ${formatAmount(available)} ${asset} available.`, lock, asset };
+      return {
+        reason: `You lock ${store.fmt(lock, asset)} ${asset} but have ${store.fmt(available, asset)} ${asset} available.`,
+        lock,
+        asset,
+      };
     }
     return { pricePerLot, lots, lock, asset };
   });
@@ -44,7 +59,8 @@
       lots: ticket.lots,
       expires_at: nowMicros() + EXPIRIES[expiry]!.micros,
     };
-    const escrow = await store.write("Placing order", () => store.api.placeOrder(terms));
+    const market = store.marketId;
+    const escrow = await store.write("Placing order", () => store.api.placeOrder(market, terms));
     if (escrow) await store.refresh();
   }
 </script>
@@ -65,13 +81,13 @@
       {#each ["Sell", "Buy"] as const as s (s)}
         <label class="side" class:selected={side === s}>
           <input type="radio" name="side" value={s} bind:group={side} />
-          {s} A
+          {s} {base}
         </label>
       {/each}
     </div>
     <div class="fields">
-      <label>Price (HF per A) <input inputmode="decimal" class="num" bind:value={price} /></label>
-      <label>Quantity (A) <input inputmode="numeric" class="num" bind:value={quantity} /></label>
+      <label>Price ({quote} per {base}) <input inputmode="decimal" class="num" bind:value={price} /></label>
+      <label>Quantity ({store.quantityUnit}) <input inputmode="numeric" class="num" bind:value={quantity} /></label>
       <label>
         Expires
         <select bind:value={expiry}>
@@ -81,13 +97,13 @@
     </div>
     <p class="preview" aria-live="polite">
       {#if "lock" in ticket && ticket.lock !== undefined}
-        You lock <strong class="num">{formatAmount(ticket.lock)} {ticket.asset}</strong> until the order fills, is
+        You lock <strong class="num">{store.fmt(ticket.lock, ticket.asset)} {ticket.asset}</strong> until the order fills, is
         cancelled or expires.
       {/if}
     </p>
     {#if "reason" in ticket}<p class="warn">{ticket.reason}</p>{/if}
     <button class="primary" type="submit" disabled={!("pricePerLot" in ticket)}>
-      {side} {parseLots(quantity) ?? ""} A
+      {side} {parseLots(quantity) ?? ""} {base}
     </button>
   </form>
   {/if}

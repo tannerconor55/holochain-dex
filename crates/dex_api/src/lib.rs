@@ -4,7 +4,8 @@
 //! part of the wire format (msgpack maps are keyed by name).
 
 use hdi::prelude::{ActionHash, AgentPubKey};
-use ledger_api::{EscrowState, PendingPark, RunMode, Side};
+use dex_core::{MarketDef, MarketId};
+use ledger_api::{EscrowState, OrderTerms, PendingPark, RunMode, Side};
 use serde::{Deserialize, Serialize};
 
 pub use dex_core::book::{BookView, OrderStatus, OrderView, PlannedFill, PriceLevel, TakePlan};
@@ -12,9 +13,41 @@ pub use dex_core::book::{BookView, OrderStatus, OrderView, PlannedFill, PriceLev
 /// A listed order as the book sees it.
 pub type Order = OrderView<ActionHash, AgentPubKey>;
 
+/// A market declared in the DNA properties, with its units' decimals for display.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct MarketInfo {
+    pub id: MarketId,
+    pub def: MarketDef,
+    pub base_decimals: u8,
+    pub quote_decimals: u8,
+}
+
+/// What the UI needs from the DNA properties.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct DexConfig {
+    /// A park's run window after it is written (before the order's expiry
+    /// cuts it short), then the settle grace; see `dex_core::timeout`.
+    pub park_timeout_secs: u64,
+    pub settle_grace_secs: u64,
+    /// In declaration order; the first is the default.
+    pub markets: Vec<MarketInfo>,
+}
+
+// Every `market` below is optional: `None` means the first market the DNA
+// properties declare.
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct PlaceOrderRequest {
+    #[serde(default)]
+    pub market: Option<MarketId>,
+    pub terms: OrderTerms,
+}
+
 /// One price level on one side of the book.
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct LevelQuery {
+    #[serde(default)]
+    pub market: Option<MarketId>,
     /// The makers' side: `Sell` for asks, `Buy` for bids.
     pub side: Side,
     pub price_per_lot: u64,
@@ -22,10 +55,12 @@ pub struct LevelQuery {
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct TakeRequest {
+    #[serde(default)]
+    pub market: Option<MarketId>,
     /// The taker's direction: `Buy` takes asks, `Sell` takes bids.
     pub take: Side,
     pub lots: u64,
-    /// Worst price accepted, in UNIT-B minor units per lot.
+    /// Worst price accepted, in quote (HF) minor units per lot.
     pub limit_price: Option<u64>,
 }
 
@@ -56,6 +91,22 @@ pub struct RawListing {
 }
 
 // ---------------------------------------------------------------------------
+// Maker presence
+// ---------------------------------------------------------------------------
+
+/// Whether an order's maker answered a ping just now. Advisory only: a maker
+/// can go offline right after answering, and one who did not answer may be
+/// back before the park's deadline. Nothing in validation depends on it.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct MakerPresence {
+    pub order: ActionHash,
+    pub maker: AgentPubKey,
+    pub reachable: bool,
+    /// Why not, when not reachable.
+    pub detail: Option<String>,
+}
+
+// ---------------------------------------------------------------------------
 // Market orders
 // ---------------------------------------------------------------------------
 
@@ -63,7 +114,7 @@ pub use dex_core::book::market::DEFAULT_MAX_SLIPPAGE_BPS;
 pub use dex_core::book::MarketPlan;
 
 /// How much a market order takes: whole lots, or a budget of the paying
-/// asset (B for a buy, A for a sell) spent on whole lots.
+/// asset (quote for a buy, base for a sell) spent on whole lots.
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MarketAmount {
     Lots(u64),
@@ -72,6 +123,8 @@ pub enum MarketAmount {
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct MarketPreviewRequest {
+    #[serde(default)]
+    pub market: Option<MarketId>,
     /// The taker's direction: `Buy` sweeps asks, `Sell` sweeps bids.
     pub side: Side,
     pub amount: MarketAmount,
@@ -81,6 +134,8 @@ pub struct MarketPreviewRequest {
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct MarketOrderRequest {
+    #[serde(default)]
+    pub market: Option<MarketId>,
     pub side: Side,
     pub lots: u64,
     pub max_slippage_bps: Option<u32>,
@@ -91,8 +146,10 @@ pub struct MarketOrderRequest {
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct MarketBudgetRequest {
+    #[serde(default)]
+    pub market: Option<MarketId>,
     pub side: Side,
-    /// Minor units of the paying asset: B for a buy, A for a sell.
+    /// Minor units of the paying asset: quote for a buy, base for a sell.
     pub budget: u64,
     pub max_slippage_bps: Option<u32>,
     pub expected: Option<MarketPlan<ActionHash>>,
@@ -110,6 +167,8 @@ pub struct FillChange {
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct MarketResult {
+    /// The market it swept; a retry sweeps the same one.
+    pub market: MarketId,
     pub plan: MarketPlan<ActionHash>,
     pub parks: Vec<PlacedPark>,
     /// Differences from `expected`; empty if none was given or nothing changed.
