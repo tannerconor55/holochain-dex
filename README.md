@@ -50,10 +50,11 @@ cargo test --manifest-path tests/sweettest/Cargo.toml   # conductor tests
 cargo test --manifest-path tests/rhai_parity/Cargo.toml # Rhai template vs dex_core (~75 s)
 ```
 
-Keep `tests/sweettest/Cargo.lock`: it pins a resolution of the conductor's
-dependency graph known to build and pass. On 0.6.3 a fresh resolve picked
-`ed25519` 3.0.0 final and broke `ed25519-dalek` inside the iroh transport;
-treat a lockfile regeneration as a change to test.
+Keep `tests/sweettest/Cargo.lock`: it is seeded from holochain 0.7.0's own
+published `Cargo.lock`, with this repo's crates added on top, so the
+conductor builds against exactly the dependency versions Holochain released
+with. On 0.6.3 a fresh resolve once broke `ed25519-dalek` inside the iroh
+transport; treat any lockfile regeneration as a change to test.
 
 Versions: `hdk = "=0.7.0"`, `hdi = "=0.8.0"`, `holochain = "=0.7.0"`
 (holonix `main-0.7`). Upgraded from 0.6.3 before the order book zomes were
