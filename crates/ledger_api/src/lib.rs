@@ -30,8 +30,19 @@ mod entries {
     #[hdk_entry_helper]
     #[derive(Clone, PartialEq)]
     pub struct Escrow {
+        /// The order's market; must be declared in the DNA properties.
+        pub market: dex_core::MarketId,
         pub terms: dex_core::OrderTerms,
+        /// The maker's latest checkpoint when opening (the lock is a debit).
+        pub checkpoint: Option<ActionHash>,
     }
+}
+
+/// Open an order's escrow in a market declared in the DNA properties.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct OpenEscrowRequest {
+    pub market: dex_core::MarketId,
+    pub terms: OrderTerms,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -70,6 +81,7 @@ pub struct RunReport {
 pub struct EscrowState {
     pub escrow: ActionHash,
     pub maker: AgentPubKey,
+    pub market: dex_core::MarketId,
     pub terms: OrderTerms,
     pub opened_at: Timestamp,
     pub locked: Amounts,

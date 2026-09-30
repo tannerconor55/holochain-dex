@@ -4,7 +4,23 @@ manifest_version: "0"
 name: dex
 integrity:
   network_seed: null
-  properties: null
+  # Read by both integrity zomes (dex_core::properties::DexProperties). An agent
+  # cannot join, and validation refuses, if these are missing or malformed.
+  # Every market is quoted in the hub unit HF. Changing any value is a new DNA
+  # hash, so a new network.
+  properties:
+    park_timeout_secs: 1800 # a park may be settled for 30 min (or until expiry) ...
+    settle_grace_secs: 300  # ... plus 5 min; after that only the taker may reclaim it
+    units:
+      - id: A
+        decimals: 2
+      - id: HF
+        decimals: 2
+    markets:
+      - base: A
+        quote: HF
+        lot_size: 100 # 1.00 A per lot
+        tick_size: 1  # prices in steps of 0.01 HF
   zomes:
     # Mock Unyt ledger. Replaced by Unyt itself once API access exists.
     - name: ledger_integrity

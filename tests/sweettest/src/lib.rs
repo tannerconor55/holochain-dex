@@ -142,6 +142,16 @@ const ALICE: usize = 0;
 const BOB: usize = 1;
 const CAROL: usize = 2;
 
+/// The demo market the DNA properties declare (A/HF).
+fn demo_market() -> dex_core::MarketId {
+    dex_core::MarketDef::default_pair().id()
+}
+
+/// Open an escrow in the demo market through the ledger directly.
+fn open(terms: OrderTerms) -> ledger_api::OpenEscrowRequest {
+    ledger_api::OpenEscrowRequest { market: demo_market(), terms }
+}
+
 fn in_one_hour() -> i64 {
     Timestamp::now().as_micros() + 3_600_000_000
 }
@@ -168,7 +178,7 @@ async fn mvp_end_to_end() {
     let _: ActionHash = env.call(ALICE, "mint", Amounts::new(10_000, 0)).await;
     let _: ActionHash = env.call(BOB, "mint", Amounts::new(0, 20_000)).await;
 
-    let escrow: ActionHash = env.call(ALICE, "open_escrow", sell_100_at_1_20()).await;
+    let escrow: ActionHash = env.call(ALICE, "open_escrow", open(sell_100_at_1_20())).await;
     let alice = env.balance(ALICE).await;
     assert_eq!(alice.available, Amounts::ZERO);
     assert_eq!(alice.locked_in_escrows, Amounts::new(10_000, 0));
@@ -249,7 +259,7 @@ async fn two_takers_cannot_both_fill_the_same_escrow() {
     let _: ActionHash = env.call(ALICE, "mint", Amounts::new(10_000, 0)).await;
     let _: ActionHash = env.call(BOB, "mint", Amounts::new(0, 12_000)).await;
     let _: ActionHash = env.call(CAROL, "mint", Amounts::new(0, 12_000)).await;
-    let escrow: ActionHash = env.call(ALICE, "open_escrow", sell_100_at_1_20()).await;
+    let escrow: ActionHash = env.call(ALICE, "open_escrow", open(sell_100_at_1_20())).await;
     env.sync().await;
 
     for taker in [BOB, CAROL] {
@@ -307,7 +317,7 @@ async fn cannot_escrow_more_than_the_balance() {
     let env = TestEnv::new(1).await;
     let _: ActionHash = env.call(ALICE, "mint", Amounts::new(5_000, 0)).await;
     let result: ConductorApiResult<ActionHash> = env
-        .call_fallible(ALICE, "open_escrow", sell_100_at_1_20())
+        .call_fallible(ALICE, "open_escrow", open(sell_100_at_1_20()))
         .await;
     assert!(result.is_err(), "100 A escrow with only 50 A must be rejected");
 }
@@ -317,7 +327,7 @@ async fn cannot_escrow_more_than_the_balance() {
 async fn only_the_maker_can_run_the_escrow() {
     let env = TestEnv::new(2).await;
     let _: ActionHash = env.call(ALICE, "mint", Amounts::new(10_000, 0)).await;
-    let escrow: ActionHash = env.call(ALICE, "open_escrow", sell_100_at_1_20()).await;
+    let escrow: ActionHash = env.call(ALICE, "open_escrow", open(sell_100_at_1_20())).await;
     env.sync().await;
 
     let result: ConductorApiResult<Option<RunReport>> = env
@@ -384,7 +394,7 @@ async fn listing_with_a_tag_that_disagrees_with_the_escrow_is_rejected() {
     let env = TestEnv::new(2).await;
     let _: ActionHash = env.call(ALICE, "mint", Amounts::new(10_000, 0)).await;
     // An escrow opened through the ledger directly is not listed yet.
-    let escrow: ActionHash = env.call(ALICE, "open_escrow", sell_100_at_1_20()).await;
+    let escrow: ActionHash = env.call(ALICE, "open_escrow", open(sell_100_at_1_20())).await;
     let terms = env.call::<_, EscrowState>(ALICE, "get_escrow_state", escrow.clone()).await.terms;
 
     let mut cheaper = terms;
@@ -393,16 +403,16 @@ async fn listing_with_a_tag_that_disagrees_with_the_escrow_is_rejected() {
     other_side.side = Side::Buy;
     let mut later = terms;
     later.expires_at += 1;
-    let good = dex_core::listing::encode_tag(&terms);
+    let good = dex_core::listing::encode_tag(&demo_market(), &terms);
     let bad_tags = [
-        ("price", dex_core::listing::encode_tag(&cheaper)),
-        ("side", dex_core::listing::encode_tag(&other_side)),
-        ("expiry", dex_core::listing::encode_tag(&later)),
+        ("price", dex_core::listing::encode_tag(&demo_market(), &cheaper)),
+        ("side", dex_core::listing::encode_tag(&demo_market(), &other_side)),
+        ("expiry", dex_core::listing::encode_tag(&demo_market(), &later)),
         ("truncated", good[..16].to_vec()),
     ];
     for (what, tag) in bad_tags {
         let result: ConductorApiResult<ActionHash> = env
-            .dex_fallible(ALICE, "list_escrow_raw", RawListing { escrow: escrow.clone(), tag })
+            .dex_fallible(ALICE, "list_escrow_raw", RawListing { escrow: escrow.clone(), tag, anchor_market: None })
             .await;
         assert!(result.is_err(), "a listing with the wrong {what} must be rejected");
     }
@@ -410,7 +420,7 @@ async fn listing_with_a_tag_that_disagrees_with_the_escrow_is_rejected() {
     // Control: the escrow's own tag passes, so the rejections above are about
     // the tag and the cross-zome escrow decode works.
     let _: ActionHash = env
-        .dex(ALICE, "list_escrow_raw", RawListing { escrow: escrow.clone(), tag: good })
+        .dex(ALICE, "list_escrow_raw", RawListing { escrow: escrow.clone(), tag: good, anchor_market: None })
         .await;
     env.sync().await;
     assert_eq!(env.book(BOB).await.asks, vec![level(120, 100, 1)]);
@@ -421,7 +431,7 @@ async fn listing_with_a_tag_that_disagrees_with_the_escrow_is_rejected() {
 async fn only_the_maker_can_list_an_escrow() {
     let env = TestEnv::new(2).await;
     let _: ActionHash = env.call(ALICE, "mint", Amounts::new(10_000, 0)).await;
-    let escrow: ActionHash = env.call(ALICE, "open_escrow", sell_100_at_1_20()).await;
+    let escrow: ActionHash = env.call(ALICE, "open_escrow", open(sell_100_at_1_20())).await;
     env.sync().await;
 
     let result: ConductorApiResult<ActionHash> =

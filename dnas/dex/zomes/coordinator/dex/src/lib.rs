@@ -16,13 +16,13 @@ use dex_api::{
     RawListing, RetryMarketRequest, TakePlan, TakeRequest, TakeResult, DEFAULT_MAX_SLIPPAGE_BPS,
 };
 use dex_core::book;
-// The default market until the DNA properties are wired in (milestone 2 step 2).
-use dex_core::MarketDef;
 use dex_core::listing::{decode_tag, encode_tag};
-use dex_integrity::{market_anchor, LinkTypes};
+use dex_core::properties::DexProperties;
+use dex_core::{MarketDef, MarketId};
+use dex_integrity::{load_properties, market_anchor, LinkTypes};
 use hdk::prelude::*;
 use ledger_api::{
-    EscrowState, OrderTerms, ParkRequest, ParkStatus, PendingPark, RunEscrowInput, RunMode, Side,
+    EscrowState, OpenEscrowRequest, OrderTerms, ParkRequest, ParkStatus, PendingPark, RunEscrowInput, RunMode, Side,
     RunReport,
 };
 use std::collections::BTreeSet;
@@ -73,8 +73,9 @@ fn notify(signal: DexSignal, agents: Vec<AgentPubKey>) -> ExternResult<()> {
 /// which is the order's identity.
 #[hdk_extern]
 pub fn place_order(terms: OrderTerms) -> ExternResult<ActionHash> {
-    let escrow: ActionHash = ledger("open_escrow", terms)?;
-    list(escrow.clone(), encode_tag(&terms))?;
+    let (market, _) = default_market()?;
+    let escrow: ActionHash = ledger("open_escrow", OpenEscrowRequest { market, terms })?;
+    list(escrow.clone(), &market, encode_tag(&market, &terms))?;
     Ok(escrow)
 }
 
@@ -83,18 +84,39 @@ pub fn place_order(terms: OrderTerms) -> ExternResult<ActionHash> {
 #[hdk_extern]
 pub fn republish_listing(escrow: ActionHash) -> ExternResult<ActionHash> {
     let state: EscrowState = ledger("get_escrow_state", escrow.clone())?;
-    list(escrow, encode_tag(&state.terms))
+    list(escrow, &state.market, encode_tag(&state.market, &state.terms))
 }
 
 /// List with a caller-chosen tag. Exists to test that validation rejects any
 /// tag except the escrow's own; it cannot create a listing `place_order` could not.
 #[hdk_extern]
 pub fn list_escrow_raw(input: RawListing) -> ExternResult<ActionHash> {
-    list(input.escrow, input.tag)
+    let market = match input.anchor_market {
+        Some(market) => market,
+        None => ledger::<_, EscrowState>("get_escrow_state", input.escrow.clone())?.market,
+    };
+    list(input.escrow, &market, input.tag)
 }
 
-fn list(escrow: ActionHash, tag: Vec<u8>) -> ExternResult<ActionHash> {
-    create_link(market_anchor()?, escrow, LinkTypes::MarketToOrders, LinkTag::new(tag))
+fn list(escrow: ActionHash, market: &MarketId, tag: Vec<u8>) -> ExternResult<ActionHash> {
+    create_link(market_anchor(market)?, escrow, LinkTypes::MarketToOrders, LinkTag::new(tag))
+}
+
+/// The DNA properties; unusable properties are an error, never a default.
+fn props() -> ExternResult<DexProperties> {
+    load_properties()?.map_err(guest)
+}
+
+/// The market this zome trades in: the first the DNA properties declare. The
+/// UI's market selector (milestone 2 step 4) will pass one explicitly.
+fn default_market() -> ExternResult<(MarketId, MarketDef)> {
+    let props = props()?;
+    let market = props
+        .markets
+        .first()
+        .cloned()
+        .ok_or_else(|| guest("the DNA properties declare no market"))?;
+    Ok((market.id(), market))
 }
 
 // ---------------------------------------------------------------------------
@@ -122,7 +144,7 @@ pub fn plan_take(request: TakeRequest) -> ExternResult<TakePlan<ActionHash>> {
 }
 
 fn plan(request: &TakeRequest, orders: &[Order], now: i64) -> ExternResult<TakePlan<ActionHash>> {
-    book::plan_take(orders, &MarketDef::default_pair(), &my_key()?, request.take, request.lots, request.limit_price, now)
+    book::plan_take(orders, &default_market()?.1, &my_key()?, request.take, request.lots, request.limit_price, now)
         .map_err(core_err)
 }
 
@@ -133,8 +155,9 @@ fn plan(request: &TakeRequest, orders: &[Order], now: i64) -> ExternResult<TakeP
 /// maker-published summary would go here. Orders whose state cannot be read
 /// yet (not gossiped) are left out rather than failing the whole book.
 fn load_orders(now: i64) -> ExternResult<Vec<Order>> {
+    let (market, _) = default_market()?;
     let links = get_links(
-        LinkQuery::try_new(market_anchor()?, LinkTypes::MarketToOrders)?,
+        LinkQuery::try_new(market_anchor(&market)?, LinkTypes::MarketToOrders)?,
         GetStrategy::Network,
     )?;
     let mut seen = BTreeSet::new();
@@ -147,7 +170,7 @@ fn load_orders(now: i64) -> ExternResult<Vec<Order>> {
             continue; // the same escrow listed twice
         }
         match decode_tag(&link.tag.0) {
-            Some(tag) if now < tag.expires_at => {}
+            Some(tag) if tag.market == market && now < tag.expires_at => {}
             _ => continue,
         }
         let Ok(state) = ledger::<_, EscrowState>("get_escrow_state", escrow) else {
@@ -291,7 +314,7 @@ pub fn retry_market_shortfall(request: RetryMarketRequest) -> ExternResult<Marke
     let orders = load_orders(now)?;
     let plan = book::market::plan_with_limit(
         &orders,
-        &MarketDef::default_pair(),
+        &default_market()?.1,
         original.plan.take,
         unfilled,
         original.plan.limit_price,
@@ -321,9 +344,10 @@ fn market_plan(
 ) -> ExternResult<MarketPlan<ActionHash>> {
     let bps = max_slippage_bps.unwrap_or(DEFAULT_MAX_SLIPPAGE_BPS);
     let me = my_key()?;
+    let (_, market) = default_market()?;
     match amount {
-        MarketAmount::Lots(lots) => book::plan_market(orders, &MarketDef::default_pair(), side, lots, bps, &me, now),
-        MarketAmount::Budget(budget) => book::plan_market_by_budget(orders, &MarketDef::default_pair(), side, budget, bps, &me, now),
+        MarketAmount::Lots(lots) => book::plan_market(orders, &market, side, lots, bps, &me, now),
+        MarketAmount::Budget(budget) => book::plan_market_by_budget(orders, &market, side, budget, bps, &me, now),
     }
     .map_err(market_err)
 }

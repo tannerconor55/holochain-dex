@@ -50,6 +50,9 @@ pub struct TakeResult {
 pub struct RawListing {
     pub escrow: ActionHash,
     pub tag: Vec<u8>,
+    /// Hang the link off this market's anchor instead of the escrow's own.
+    #[serde(default)]
+    pub anchor_market: Option<dex_core::MarketId>,
 }
 
 // ---------------------------------------------------------------------------

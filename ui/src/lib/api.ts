@@ -60,6 +60,8 @@ export interface OrderTerms {
 export interface EscrowState {
   escrow: ActionHash;
   maker: AgentPubKey;
+  /** The market id: 64 hex characters (dex_core::MarketId). */
+  market: string;
   terms: OrderTerms;
   opened_at: number;
   locked: Amounts;

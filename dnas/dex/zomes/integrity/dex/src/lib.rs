@@ -1,7 +1,7 @@
 //! # dex_integrity — order book listings
 //!
-//! An order is listed by a `MarketToOrders` link from the market anchor to the
-//! order's ledger escrow. There are no entry types: the escrow already holds
+//! An order is listed by a `MarketToOrders` link from its market's anchor to
+//! the order's ledger escrow. Markets come from the DNA properties. There are no entry types: the escrow already holds
 //! the terms, and a second copy could disagree with it.
 //!
 //! ## What validation guarantees
@@ -12,7 +12,8 @@
 //! * **Listings cannot lie.** The tag must equal
 //!   [`dex_core::listing::encode_tag`] of the escrow's terms, so side, price
 //!   and expiry in the book are exactly the escrow's.
-//! * **One market.** The base is the anchor for [`MARKET`].
+//! * **Its own market.** The base is the anchor of the escrow's market, and
+//!   the tag starts with that market's id.
 //! * **Listings are permanent.** Link deletes are rejected. Filled, cancelled
 //!   and expired orders leave the book because readers filter on ledger state.
 //!
@@ -20,16 +21,35 @@
 //! deduplicate by target.
 
 use dex_core::listing::encode_tag;
+use dex_core::properties::DexProperties;
+use dex_core::MarketId;
 use hdi::prelude::*;
 use ledger_api::{Escrow, ESCROW_ENTRY_INDEX, LEDGER_INTEGRITY_ZOME};
 
-/// The single market this DNA lists.
-pub const MARKET: &str = "unit_a_unit_b";
-
-/// The hash every listing link hangs off. A plain path hash: listings are
+/// The hash a market's listing links hang off: one anchor per market, so a
+/// book read fetches one market's links only. A plain path hash: listings are
 /// found by `get_links` on it, so no path links (`ensure`) are needed.
-pub fn market_anchor() -> ExternResult<EntryHash> {
-    Path::from(MARKET).path_entry_hash()
+pub fn market_anchor(market: &MarketId) -> ExternResult<EntryHash> {
+    Path::from(vec![Component::from("market"), Component::from(market.to_hex())]).path_entry_hash()
+}
+
+/// The DNA properties, checked; `Err` says why they are unusable.
+pub fn load_properties() -> ExternResult<Result<DexProperties, String>> {
+    let bytes = dna_info()?.modifiers.properties;
+    let props: DexProperties = match holochain_serialized_bytes::decode(bytes.bytes()) {
+        Ok(props) => props,
+        Err(e) => return Ok(Err(format!("malformed DNA properties: {e}"))),
+    };
+    Ok(props.check().map(|()| props).map_err(|e| format!("invalid DNA properties: {e}")))
+}
+
+/// An agent cannot join a DNA whose properties are missing or malformed.
+#[hdk_extern]
+pub fn genesis_self_check(_data: GenesisSelfCheckData) -> ExternResult<ValidateCallbackResult> {
+    match load_properties()? {
+        Ok(_) => valid(),
+        Err(why) => invalid(why),
+    }
 }
 
 #[hdk_link_types]
@@ -70,10 +90,6 @@ pub fn validate(op: Op) -> ExternResult<ValidateCallbackResult> {
 
 fn validate_listing(action: &TypedAction<CreateLinkData>) -> ExternResult<ValidateCallbackResult> {
     let link = &action.data;
-    ensure!(
-        link.base_address == AnyLinkableHash::from(market_anchor()?),
-        "listings must hang off the {MARKET} market anchor"
-    );
     let Some(escrow_hash) = link.target_address.clone().into_action_hash() else {
         return invalid("a listing must target an escrow action");
     };
@@ -89,9 +105,18 @@ fn validate_listing(action: &TypedAction<CreateLinkData>) -> ExternResult<Valida
         .as_option()
         .ok_or_else(|| wasm_error!(WasmErrorInner::Guest("escrow record has no entry".into())))?;
     let escrow = Escrow::try_from(entry)?;
+    let props = match load_properties()? {
+        Ok(props) => props,
+        Err(why) => return invalid(why),
+    };
+    ensure!(props.market(&escrow.market).is_ok(), "the escrow's market is not declared");
     ensure!(
-        link.tag.0 == encode_tag(&escrow.terms),
-        "listing tag does not match the escrow's terms"
+        link.base_address == AnyLinkableHash::from(market_anchor(&escrow.market)?),
+        "a listing must hang off its escrow's market anchor"
+    );
+    ensure!(
+        link.tag.0 == encode_tag(&escrow.market, &escrow.terms),
+        "listing tag does not match the escrow's market and terms"
     );
     valid()
 }

@@ -12,14 +12,17 @@
 //! | `run_escrow`        | maker executes the agreement (a RAVE)                  |
 //! | `collect_all`       | receivers collect allocations                          |
 //!
-//! Reads use `GetStrategy::Network` throughout. Whether the UI needs an
-//! explicit local/network choice (zero-arc phones) is still an open decision.
+//! Reads use `GetStrategy::Network` throughout: v1 targets desktop full-arc
+//! nodes only.
 
+use dex_core::checkpoint::CheckpointState;
+use dex_core::properties::DexProperties;
+use dex_core::timeout::park_deadline;
 use dex_core::{execute_run, select_parks, ParkInput, RunInput};
 use hdk::prelude::*;
 use ledger_api::{
-    BalanceView, EscrowState, ParkFill, ParkRequest, ParkSettlement, ParkStatus, PendingPark,
-    RunEscrowInput, RunReport,
+    BalanceView, EscrowState, OpenEscrowRequest, ParkFill, ParkRequest, ParkSettlement, ParkStatus,
+    PendingPark, RunEscrowInput, RunReport,
 };
 use ledger_integrity::*;
 use std::collections::BTreeSet;
@@ -34,11 +37,17 @@ pub fn mint(amounts: Amounts) -> ExternResult<ActionHash> {
     create_entry(&EntryTypes::Mint(Mint { amounts }))
 }
 
-/// Open an order's escrow, locking the maker's funds. The returned hash is
-/// the order's identity.
+/// Open an order's escrow in a declared market, locking the maker's funds.
+/// The returned hash is the order's identity.
 #[hdk_extern]
-pub fn open_escrow(terms: OrderTerms) -> ExternResult<ActionHash> {
-    let escrow = create_entry(&EntryTypes::Escrow(Escrow { terms }))?;
+pub fn open_escrow(request: OpenEscrowRequest) -> ExternResult<ActionHash> {
+    let props = props()?;
+    props.market(&request.market).map_err(|e| guest(e.to_string()))?;
+    let escrow = create_entry(&EntryTypes::Escrow(Escrow {
+        market: request.market,
+        terms: request.terms,
+        checkpoint: own_chain()?.latest_checkpoint,
+    }))?;
     create_link(my_key()?, escrow.clone(), LinkTypes::AgentToEscrows, ())?;
     Ok(escrow)
 }
@@ -47,10 +56,13 @@ pub fn open_escrow(terms: OrderTerms) -> ExternResult<ActionHash> {
 /// maker's next run.
 #[hdk_extern]
 pub fn park(request: ParkRequest) -> ExternResult<ActionHash> {
+    let (_, escrow) = get_escrow(&request.escrow)?;
     let park = create_entry(&EntryTypes::Park(Park {
         escrow: request.escrow.clone(),
+        market: escrow.market,
         amounts: request.amounts,
         requested_lots: request.requested_lots,
+        checkpoint: own_chain()?.latest_checkpoint,
     }))?;
     create_link(request.escrow, park.clone(), LinkTypes::EscrowToParks, ())?;
     Ok(park)
@@ -74,8 +86,13 @@ pub fn run_escrow(input: RunEscrowInput) -> ExternResult<Option<RunReport>> {
         return Err(guest("only the escrow's maker can run it"));
     }
 
+    let props = props()?;
+    let market = market_of(&props, &escrow)?.clone();
+    let timing = props.timing().map_err(|e| guest(e.to_string()))?;
+    let now = sys_time()?.as_micros();
+
     // Our own chain is authoritative for our runs: read it locally.
-    let mine = own_ledger()?;
+    let mine = own_chain()?;
     let mut my_runs: Vec<&(ActionHash, u32, SettlementRun)> = mine
         .runs
         .iter()
@@ -85,14 +102,22 @@ pub fn run_escrow(input: RunEscrowInput) -> ExternResult<Option<RunReport>> {
     let prev_run = my_runs.first().map(|(hash, _, _)| hash.clone());
     let prev_locked = match my_runs.first() {
         Some((_, _, run)) => run.locked.clone(),
-        None => escrow.terms.initial_lock(&MarketDef::default_pair()).map_err(core_err)?,
+        None => escrow.terms.initial_lock(&market).map_err(core_err)?,
     };
     let consumed: BTreeSet<ActionHash> = my_runs
         .iter()
         .flat_map(|(_, _, r)| r.consumed.iter().cloned())
         .collect();
 
-    let pending = pending_park_inputs(&input.escrow, &consumed)?;
+    // Parks past (or within a margin of) their deadline are the taker's to
+    // reclaim; consuming one would fail validation.
+    let pending: Vec<_> = pending_park_inputs(&input.escrow, &consumed)?
+        .into_iter()
+        .filter(|p| {
+            park_deadline(p.parked_at, escrow.terms.expires_at, &timing)
+                .is_some_and(|deadline| now.saturating_add(DEADLINE_MARGIN_US) < deadline)
+        })
+        .collect();
     let pending_count = pending.len();
     let parks = select_parks(pending);
     if input.mode == RunMode::Fill && parks.is_empty() {
@@ -101,11 +126,11 @@ pub fn run_escrow(input: RunEscrowInput) -> ExternResult<Option<RunReport>> {
 
     let run_input = RunInput {
         terms: escrow.terms,
-        market: MarketDef::default_pair(),
+        market,
         maker: me,
         prev_locked,
         parks,
-        now: sys_time()?.as_micros(),
+        now,
         mode: input.mode,
     };
     let output = execute_run(&run_input).map_err(core_err)?;
@@ -151,7 +176,8 @@ pub fn run_escrow(input: RunEscrowInput) -> ExternResult<Option<RunReport>> {
 #[hdk_extern]
 pub fn collect_all() -> ExternResult<Vec<ActionHash>> {
     let me = my_key()?;
-    let collected = collected_set(&own_ledger()?);
+    let own = own_chain()?;
+    let collected = collected_set(&own);
     let mut created = Vec::new();
     for (run_hash, run) in incoming_runs(&me)? {
         for (index, allocation) in run.allocations.iter().enumerate() {
@@ -163,6 +189,7 @@ pub fn collect_all() -> ExternResult<Vec<ActionHash>> {
                 run: run_hash.clone(),
                 index,
                 amounts: allocation.amounts.clone(),
+                checkpoint: own.latest_checkpoint.clone(),
             }))?);
         }
     }
@@ -178,25 +205,28 @@ pub fn get_escrow_state(escrow: ActionHash) -> ExternResult<EscrowState> {
     let (record, entry) = get_escrow(&escrow)?;
     let maker = record.action().author().clone();
     let runs = escrow_runs(&escrow)?;
+    let props = props()?;
+    let market = market_of(&props, &entry)?;
 
     // Walk the runs in order. Lots still unfilled when the order was released
     // were returned to the maker, not sold, so they don't count as filled.
-    let mut locked = entry.terms.initial_lock(&MarketDef::default_pair()).map_err(core_err)?;
+    let mut locked = entry.terms.initial_lock(market).map_err(core_err)?;
     let mut unfilled_at_release = None;
     let mut released_at = None;
     for r in &runs {
         if r.run.mode == RunMode::Release && unfilled_at_release.is_none() {
-            unfilled_at_release = Some(entry.terms.remaining_lots(&locked, &MarketDef::default_pair()).map_err(core_err)?);
+            unfilled_at_release = Some(entry.terms.remaining_lots(&locked, market).map_err(core_err)?);
             released_at = Some(r.at);
         }
         locked = r.run.locked.clone();
     }
-    let remaining_lots = entry.terms.remaining_lots(&locked, &MarketDef::default_pair()).map_err(core_err)?;
+    let remaining_lots = entry.terms.remaining_lots(&locked, market).map_err(core_err)?;
     let unfilled = unfilled_at_release.unwrap_or(remaining_lots);
     let released = unfilled_at_release.is_some();
     Ok(EscrowState {
         escrow,
         maker,
+        market: entry.market,
         terms: entry.terms,
         opened_at: record.action().timestamp(),
         locked,
@@ -262,7 +292,7 @@ pub fn get_my_parks() -> ExternResult<Vec<ParkStatus>> {
 /// Escrows the caller has opened, newest first.
 #[hdk_extern]
 pub fn get_my_escrows() -> ExternResult<Vec<ActionHash>> {
-    let mut escrows = own_ledger()?.escrows;
+    let mut escrows = own_chain()?.escrows;
     escrows.reverse();
     Ok(escrows.into_iter().map(|(hash, _)| hash).collect())
 }
@@ -270,8 +300,12 @@ pub fn get_my_escrows() -> ExternResult<Vec<ActionHash>> {
 #[hdk_extern]
 pub fn get_balance() -> ExternResult<BalanceView> {
     let me = my_key()?;
-    let mine = own_ledger()?;
-    let available = mine.available().map_err(core_err)?;
+    let props = props()?;
+    let mine = own_chain()?;
+    let available = own_state(&mine, &props)?
+        .totals
+        .available()
+        .map_err(|e| guest(e.to_string()))?;
 
     let mut locked_in_escrows = Amounts::ZERO;
     for (escrow_hash, escrow) in &mine.escrows {
@@ -282,17 +316,18 @@ pub fn get_balance() -> ExternResult<BalanceView> {
             .max_by_key(|(_, seq, _)| *seq);
         let lock = match latest {
             Some((_, _, run)) => run.locked.clone(),
-            None => escrow.terms.initial_lock(&MarketDef::default_pair()).map_err(core_err)?,
+            None => escrow.terms.initial_lock(market_of(&props, escrow)?).map_err(core_err)?,
         };
         locked_in_escrows = add(&locked_in_escrows, &lock)?;
     }
 
     let mut parked = Amounts::ZERO;
+    let reclaimed: BTreeSet<&ActionHash> = mine.reclaims.iter().map(|r| &r.park).collect();
     for (park_hash, park) in &mine.parks {
         let consumed = escrow_runs(&park.escrow)?
             .iter()
             .any(|r| r.run.consumed.contains(park_hash));
-        if !consumed {
+        if !consumed && !reclaimed.contains(park_hash) {
             parked = add(&parked, &park.amounts)?;
         }
     }
@@ -350,27 +385,77 @@ fn get_escrow(hash: &ActionHash) -> ExternResult<(Record, Escrow)> {
     }
 }
 
-/// The caller's ledger entries, read from their own source chain.
-fn own_ledger() -> ExternResult<ChainLedger> {
-    let mut ledger = ChainLedger::default();
-    for record in query(ChainQueryFilter::new().include_entries(true))? {
-        if let Some(entry) = decode_record(&record)? {
-            ledger.push(
-                record.action_address().clone(),
-                record.action().action_seq(),
-                entry,
-            );
-        }
-    }
-    Ok(ledger)
+/// Parks within this long of their deadline are left for the taker to
+/// reclaim rather than consumed, so a run never races its own validation.
+const DEADLINE_MARGIN_US: i64 = 60_000_000;
+
+/// The DNA properties; unusable properties are an error, never a default.
+fn props() -> ExternResult<DexProperties> {
+    load_properties()?.map_err(guest)
 }
 
-fn collected_set(ledger: &ChainLedger) -> BTreeSet<(ActionHash, u32)> {
-    ledger
-        .collects
-        .iter()
-        .map(|c| (c.run.clone(), c.index))
-        .collect()
+fn market_of<'p>(props: &'p DexProperties, escrow: &Escrow) -> ExternResult<&'p MarketDef> {
+    props.market(&escrow.market).map_err(|e| guest(e.to_string()))
+}
+
+/// The caller's ledger entries, read from their own source chain.
+#[derive(Default)]
+struct OwnChain {
+    escrows: Vec<(ActionHash, Escrow)>,
+    parks: Vec<(ActionHash, Park)>,
+    /// `(action hash, action_seq, run)`.
+    runs: Vec<(ActionHash, u32, SettlementRun)>,
+    collects: Vec<Collect>,
+    reclaims: Vec<Reclaim>,
+    latest_checkpoint: Option<ActionHash>,
+    /// Every ledger entry, oldest first.
+    ledger: Vec<(ActionHash, EntryTypes)>,
+}
+
+fn own_chain() -> ExternResult<OwnChain> {
+    let mut own = OwnChain::default();
+    for record in query(ChainQueryFilter::new().include_entries(true))? {
+        let Some(entry) = decode_record(&record)? else { continue };
+        let hash = record.action_address().clone();
+        match &entry {
+            EntryTypes::Escrow(e) => own.escrows.push((hash.clone(), e.clone())),
+            EntryTypes::Park(p) => own.parks.push((hash.clone(), p.clone())),
+            EntryTypes::SettlementRun(r) => own.runs.push((hash.clone(), record.action().action_seq(), r.clone())),
+            EntryTypes::Collect(c) => own.collects.push(c.clone()),
+            EntryTypes::Reclaim(r) => own.reclaims.push(r.clone()),
+            EntryTypes::Checkpoint(_) => own.latest_checkpoint = Some(hash.clone()),
+            EntryTypes::Mint(_) => {}
+        }
+        own.ledger.push((hash, entry));
+    }
+    Ok(own)
+}
+
+/// The caller's ledger state from genesis, by the same arithmetic validation
+/// uses (`dex_core::checkpoint`).
+fn own_state(own: &OwnChain, props: &DexProperties) -> ExternResult<CheckpointState<ActionHash>> {
+    let mut events = Vec::new();
+    for (hash, entry) in &own.ledger {
+        if let Some(event) = ledger_event(hash, entry, props)?.map_err(guest)? {
+            events.push(event);
+        }
+    }
+    CheckpointState::genesis().extend(&events).map_err(|e| guest(e.to_string()))
+}
+
+fn collected_set(own: &OwnChain) -> BTreeSet<(ActionHash, u32)> {
+    own.collects.iter().map(|c| (c.run.clone(), c.index)).collect()
+}
+
+/// Parks of this escrow that their takers have reclaimed.
+fn reclaimed_parks(escrow: &ActionHash) -> ExternResult<BTreeSet<ActionHash>> {
+    let mut parks = BTreeSet::new();
+    for hash in link_targets(escrow.clone(), LinkTypes::EscrowToReclaims)? {
+        if let Some(EntryTypes::Reclaim(r)) = decode_record(&get_record(&hash)?)? {
+            parks.insert(r.park);
+        }
+    }
+    Ok(parks)
 }
 
 fn link_targets(base: impl Into<AnyLinkableHash>, link_type: LinkTypes) -> ExternResult<Vec<ActionHash>> {
@@ -420,6 +505,8 @@ fn replay_fill(
     park: &ActionHash,
 ) -> ExternResult<u64> {
     let (escrow_record, entry) = get_escrow(escrow)?;
+    let props = props()?;
+    let market = market_of(&props, &entry)?;
     let prev_locked = match &consuming.run.prev_run {
         Some(prev) => {
             runs.iter()
@@ -429,7 +516,7 @@ fn replay_fill(
                 .locked
                 .clone()
         }
-        None => entry.terms.initial_lock(&MarketDef::default_pair()).map_err(core_err)?,
+        None => entry.terms.initial_lock(market).map_err(core_err)?,
     };
     let mut parks = Vec::with_capacity(consuming.run.consumed.len());
     for hash in &consuming.run.consumed {
@@ -447,7 +534,7 @@ fn replay_fill(
     }
     let output = execute_run(&RunInput {
         terms: entry.terms,
-        market: MarketDef::default_pair(),
+        market: market.clone(),
         maker: escrow_record.action().author().clone(),
         prev_locked,
         parks,
@@ -478,9 +565,10 @@ fn pending_park_inputs(
     escrow: &ActionHash,
     consumed: &BTreeSet<ActionHash>,
 ) -> ExternResult<Vec<ParkInput<ActionHash, AgentPubKey>>> {
+    let reclaimed = reclaimed_parks(escrow)?;
     let mut parks = Vec::new();
     for hash in link_targets(escrow.clone(), LinkTypes::EscrowToParks)? {
-        if consumed.contains(&hash) {
+        if consumed.contains(&hash) || reclaimed.contains(&hash) {
             continue;
         }
         let record = get_record(&hash)?;
