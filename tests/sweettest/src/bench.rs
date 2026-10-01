@@ -69,20 +69,42 @@ async fn measure(n: usize) -> Row {
     for _ in 0..filled {
         to_fill.push(env.dex::<_, ActionHash>(ALICE, "place_order", place(sell(1, 125))).await);
     }
+    // Live orders last 6 h (within the 7-day maximum): building 1000 orders
+    // takes over an hour, longer than `sell`'s default 1 h expiry.
     for _ in 0..live {
-        let _: ActionHash = env.dex(ALICE, "place_order", place(sell(1, 140))).await;
+        let expires_at = Timestamp::now().as_micros() + 6 * 3_600_000_000;
+        let _: ActionHash = env.dex(ALICE, "place_order", place(OrderTerms { expires_at, ..sell(1, 140) })).await;
     }
+    let placed = setup.elapsed();
     for escrow in &to_cancel {
         let _: Vec<RunReport> = env.dex(ALICE, "cancel_order", escrow.clone()).await;
     }
+    let cancelled_at = setup.elapsed();
     env.sync().await;
     for escrow in &to_fill {
         let _: ActionHash = env.call(BOB, "park", park_request(escrow, 125, 1)).await;
     }
+    let parked_at = setup.elapsed();
     env.sync().await;
     for escrow in &to_fill {
         let _: Vec<RunReport> = env.dex(ALICE, "settle_order", escrow.clone()).await;
     }
+    let settled_at = setup.elapsed();
+    let per = |d: Duration, k: usize| d.as_millis() / k.max(1) as u128;
+    eprintln!(
+        "bench: N={n} phases: place {} orders {:.0} s ({} ms each), cancel {} {:.0} s ({} ms each), park {} {:.0} s, settle {} {:.0} s ({} ms each)",
+        n,
+        placed.as_secs_f64(),
+        per(placed, n),
+        cancelled,
+        (cancelled_at - placed).as_secs_f64(),
+        per(cancelled_at - placed, cancelled),
+        filled,
+        (parked_at - cancelled_at).as_secs_f64(),
+        filled,
+        (settled_at - parked_at).as_secs_f64(),
+        per(settled_at - parked_at, filled),
+    );
     while Timestamp::now().as_micros() <= last_expiry {
         tokio::time::sleep(Duration::from_millis(250)).await;
     }
