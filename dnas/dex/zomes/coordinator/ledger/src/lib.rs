@@ -95,13 +95,11 @@ pub fn run_escrow(input: RunEscrowInput) -> ExternResult<Option<RunReport>> {
     let timing = props.timing().map_err(|e| guest(e.to_string()))?;
     let now = sys_time()?.as_micros();
 
-    // Our own chain is authoritative for our runs: read it locally.
-    let mine = own_chain()?;
-    let mut my_runs: Vec<&(ActionHash, u32, SettlementRun)> = mine
-        .runs
-        .iter()
-        .filter(|(_, _, r)| r.escrow == input.escrow)
-        .collect();
+    // Our own chain is authoritative for our runs: read them locally (all
+    // our runs, not the whole chain).
+    let mine = own_runs()?;
+    let mut my_runs: Vec<&(ActionHash, u32, SettlementRun)> =
+        mine.iter().filter(|(_, _, r)| r.escrow == input.escrow).collect();
     my_runs.sort_by_key(|(_, seq, _)| std::cmp::Reverse(*seq));
     let prev_run = my_runs.first().map(|(hash, _, _)| hash.clone());
     let prev_locked = match my_runs.first() {
@@ -181,7 +179,8 @@ pub fn run_escrow(input: RunEscrowInput) -> ExternResult<Option<RunReport>> {
 #[hdk_extern]
 pub fn collect_all() -> ExternResult<Vec<ActionHash>> {
     let me = my_key()?;
-    let collected = collected_set(&own_chain()?);
+    let props = props()?;
+    let collected: BTreeSet<(ActionHash, u32)> = recent()?.state(&props)?.collected.into_iter().collect();
     let mut created = Vec::new();
     for (run_hash, run) in incoming_runs(&me)? {
         for (index, allocation) in run.allocations.iter().enumerate() {
@@ -219,7 +218,7 @@ pub fn reclaim_park(park: ActionHash) -> ExternResult<ActionHash> {
     if park_record.action().author() != &me {
         return Err(guest("only the park's author can reclaim it"));
     }
-    if own_chain()?.reclaims.iter().any(|r| r.park == park) {
+    if own_reclaims()?.iter().any(|(_, r)| r.park == park) {
         return Err(guest("this park was already reclaimed"));
     }
     if escrow_runs(&parked.escrow)?.iter().any(|r| r.run.consumed.contains(&park)) {
@@ -301,9 +300,9 @@ pub fn get_escrow_trades(escrow: ActionHash) -> ExternResult<Vec<dex_trades::Tra
 #[hdk_extern]
 pub fn get_my_checkpoints() -> ExternResult<Vec<CheckpointView>> {
     let mut out = Vec::new();
-    for record in query(ChainQueryFilter::new().include_entries(true))? {
-        if let Some(EntryTypes::Checkpoint(c)) = decode_record(&record)? {
-            out.push(CheckpointView { checkpoint: record.action_address().clone(), state: c.state });
+    for e in own_of(UnitEntryTypes::Checkpoint)? {
+        if let EntryTypes::Checkpoint(c) = e.entry {
+            out.push(CheckpointView { checkpoint: e.hash, state: c.state });
         }
     }
     Ok(out)
@@ -375,13 +374,12 @@ pub fn get_my_parks() -> ExternResult<Vec<ParkStatus>> {
     let props = props()?;
     let timing = props.timing().map_err(|e| guest(e.to_string()))?;
     let now = sys_time()?.as_micros();
-    let own = own_chain()?;
+    let reclaims_by_park: std::collections::BTreeMap<ActionHash, ActionHash> =
+        own_reclaims()?.into_iter().map(|(hash, r)| (r.park, hash)).collect();
     let mut out = Vec::new();
-    for record in query(ChainQueryFilter::new().include_entries(true))?.into_iter().rev() {
-        let Some(EntryTypes::Park(park)) = decode_record(&record)? else {
-            continue;
-        };
-        let hash = record.action_address().clone();
+    for e in own_of(UnitEntryTypes::Park)?.into_iter().rev() {
+        let EntryTypes::Park(park) = e.entry else { continue };
+        let hash = e.hash;
         let runs = escrow_runs(&park.escrow)?;
         let settlement = match runs.iter().find(|r| r.run.consumed.contains(&hash)) {
             Some(consuming) => Some(ParkSettlement {
@@ -391,9 +389,9 @@ pub fn get_my_parks() -> ExternResult<Vec<ParkStatus>> {
             None => None,
         };
         let (escrow_record, escrow) = get_escrow(&park.escrow)?;
-        let deadline = park_deadline(record.action().timestamp().as_micros(), escrow.terms.expires_at, &timing)
+        let deadline = park_deadline(e.timestamp.as_micros(), escrow.terms.expires_at, &timing)
             .ok_or_else(|| guest("park deadline overflows"))?;
-        let reclaimed = own.reclaims_by_park.get(&hash).cloned();
+        let reclaimed = reclaims_by_park.get(&hash).cloned();
         let reclaimable = settlement.is_none()
             && reclaimed.is_none()
             && now >= deadline
@@ -403,7 +401,7 @@ pub fn get_my_parks() -> ExternResult<Vec<ParkStatus>> {
             escrow: park.escrow,
             amounts: park.amounts,
             requested_lots: park.requested_lots,
-            parked_at: record.action().timestamp(),
+            parked_at: e.timestamp,
             settlement,
             deadline: Timestamp::from_micros(deadline),
             reclaimed,
@@ -416,25 +414,21 @@ pub fn get_my_parks() -> ExternResult<Vec<ParkStatus>> {
 /// Escrows the caller has opened, newest first.
 #[hdk_extern]
 pub fn get_my_escrows() -> ExternResult<Vec<ActionHash>> {
-    let mut escrows = own_chain()?.escrows;
-    escrows.reverse();
-    Ok(escrows.into_iter().map(|(hash, _)| hash).collect())
+    Ok(own_of(UnitEntryTypes::Escrow)?.into_iter().rev().map(|e| e.hash).collect())
 }
 
 #[hdk_extern]
 pub fn get_balance() -> ExternResult<BalanceView> {
     let me = my_key()?;
     let props = props()?;
-    let mine = own_chain()?;
-    let available = own_state(&mine, &props)?
-        .totals
-        .available()
-        .map_err(|e| guest(e.to_string()))?;
+    let state = recent()?.state(&props)?;
+    let available = state.totals.available().map_err(|e| guest(e.to_string()))?;
+    let runs = own_runs()?;
 
     let mut locked_in_escrows = Amounts::ZERO;
-    for (escrow_hash, escrow) in &mine.escrows {
-        let latest = mine
-            .runs
+    for e in own_of(UnitEntryTypes::Escrow)? {
+        let (escrow_hash, EntryTypes::Escrow(escrow)) = (&e.hash, &e.entry) else { continue };
+        let latest = runs
             .iter()
             .filter(|(_, _, r)| &r.escrow == escrow_hash)
             .max_by_key(|(_, seq, _)| *seq);
@@ -446,8 +440,9 @@ pub fn get_balance() -> ExternResult<BalanceView> {
     }
 
     let mut parked = Amounts::ZERO;
-    let reclaimed: BTreeSet<&ActionHash> = mine.reclaims.iter().map(|r| &r.park).collect();
-    for (park_hash, park) in &mine.parks {
+    let reclaimed: BTreeSet<ActionHash> = own_reclaims()?.into_iter().map(|(_, r)| r.park).collect();
+    for e in own_of(UnitEntryTypes::Park)? {
+        let (park_hash, EntryTypes::Park(park)) = (&e.hash, &e.entry) else { continue };
         let consumed = escrow_runs(&park.escrow)?
             .iter()
             .any(|r| r.run.consumed.contains(park_hash));
@@ -456,7 +451,7 @@ pub fn get_balance() -> ExternResult<BalanceView> {
         }
     }
 
-    let collected = collected_set(&mine);
+    let collected: BTreeSet<(ActionHash, u32)> = state.collected.into_iter().collect();
     let mut uncollected = Amounts::ZERO;
     for (run_hash, run) in incoming_runs(&me)? {
         for (index, allocation) in run.allocations.iter().enumerate() {
@@ -528,65 +523,137 @@ fn market_of<'p>(props: &'p DexProperties, escrow: &Escrow) -> ExternResult<&'p 
     props.market(&escrow.market).map_err(|e| guest(e.to_string()))
 }
 
-/// The caller's ledger entries, read from their own source chain.
-#[derive(Default)]
-struct OwnChain {
-    escrows: Vec<(ActionHash, Escrow)>,
-    parks: Vec<(ActionHash, Park)>,
-    /// `(action hash, action_seq, run)`.
-    runs: Vec<(ActionHash, u32, SettlementRun)>,
-    collects: Vec<Collect>,
-    reclaims: Vec<Reclaim>,
-    reclaims_by_park: std::collections::BTreeMap<ActionHash, ActionHash>,
-    latest_checkpoint: Option<ActionHash>,
-    /// The latest checkpoint's `action_seq`.
-    checkpoint_seq: Option<u32>,
-    /// The chain head's `action_seq`.
-    head_seq: u32,
-    /// Ledger entries after the latest checkpoint.
-    ledger_since_checkpoint: usize,
-    /// Every ledger entry, oldest first.
-    ledger: Vec<(ActionHash, EntryTypes)>,
+// ---------------------------------------------------------------------------
+// The caller's own chain, read without walking all of it
+// ---------------------------------------------------------------------------
+//
+// A write needs the author's ledger state (for its checkpoint citation and
+// to decide when the next checkpoint is due). The latest checkpoint already
+// holds it up to its position, so only the records after it are read: at
+// most `CHECKPOINT_AFTER_ACTIONS` actions, whatever the chain's length. Lists
+// of one entry type (my escrows, parks, runs, reclaims) use a type-filtered
+// query, which decodes only that type. Before this, every write decoded the
+// whole chain, so a history of n writes cost O(n²).
+
+/// One of the caller's ledger entries.
+struct OwnEntry {
+    hash: ActionHash,
+    seq: u32,
+    timestamp: Timestamp,
+    entry: EntryTypes,
 }
 
-fn own_chain() -> ExternResult<OwnChain> {
-    let mut own = OwnChain::default();
-    for record in query(ChainQueryFilter::new().include_entries(true))? {
-        own.head_seq = own.head_seq.max(record.action().action_seq());
+fn decode_own(records: Vec<Record>) -> ExternResult<Vec<OwnEntry>> {
+    let mut out = Vec::with_capacity(records.len());
+    for record in records {
         let Some(entry) = decode_record(&record)? else { continue };
-        let hash = record.action_address().clone();
-        own.ledger_since_checkpoint += 1;
-        match &entry {
-            EntryTypes::Escrow(e) => own.escrows.push((hash.clone(), e.clone())),
-            EntryTypes::Park(p) => own.parks.push((hash.clone(), p.clone())),
-            EntryTypes::SettlementRun(r) => own.runs.push((hash.clone(), record.action().action_seq(), r.clone())),
-            EntryTypes::Collect(c) => own.collects.push(c.clone()),
-            EntryTypes::Reclaim(r) => {
-                own.reclaims.push(r.clone());
-                own.reclaims_by_park.insert(r.park.clone(), hash.clone());
-            }
-            EntryTypes::Checkpoint(_) => {
-                own.latest_checkpoint = Some(hash.clone());
-                own.checkpoint_seq = Some(record.action().action_seq());
-                own.ledger_since_checkpoint = 0;
-            }
-            EntryTypes::Mint(_) => {}
-        }
-        own.ledger.push((hash, entry));
+        out.push(OwnEntry {
+            hash: record.action_address().clone(),
+            seq: record.action().action_seq(),
+            timestamp: record.action().timestamp(),
+            entry,
+        });
     }
-    Ok(own)
+    out.sort_by_key(|e| e.seq);
+    Ok(out)
 }
 
-/// The caller's ledger state from genesis, by the same arithmetic validation
-/// uses (`dex_core::checkpoint`).
-fn own_state(own: &OwnChain, props: &DexProperties) -> ExternResult<CheckpointState<ActionHash>> {
-    let mut events = Vec::new();
-    for (hash, entry) in &own.ledger {
-        if let Some(event) = ledger_event(hash, entry, props)?.map_err(guest)? {
-            events.push(event);
+/// The caller's entries of one type, oldest first.
+fn own_of(unit: UnitEntryTypes) -> ExternResult<Vec<OwnEntry>> {
+    decode_own(query(ChainQueryFilter::new().entry_type(EntryType::try_from(unit)?).include_entries(true))?)
+}
+
+/// The caller's runs as `(hash, action_seq, run)`, oldest first.
+fn own_runs() -> ExternResult<Vec<(ActionHash, u32, SettlementRun)>> {
+    Ok(own_of(UnitEntryTypes::SettlementRun)?
+        .into_iter()
+        .filter_map(|e| match e.entry {
+            EntryTypes::SettlementRun(r) => Some((e.hash, e.seq, r)),
+            _ => None,
+        })
+        .collect())
+}
+
+/// The caller's reclaims as `(hash, reclaim)`.
+fn own_reclaims() -> ExternResult<Vec<(ActionHash, Reclaim)>> {
+    Ok(own_of(UnitEntryTypes::Reclaim)?
+        .into_iter()
+        .filter_map(|e| match e.entry {
+            EntryTypes::Reclaim(r) => Some((e.hash, r)),
+            _ => None,
+        })
+        .collect())
+}
+
+/// The caller's latest checkpoint and every ledger entry after it.
+struct Recent {
+    /// `(hash, action_seq, state)` of the latest checkpoint.
+    checkpoint: Option<(ActionHash, u32, CheckpointState<ActionHash>)>,
+    /// Ledger entries after it (or from genesis), oldest first.
+    segment: Vec<OwnEntry>,
+    /// The chain head's `action_seq`, this call's writes included.
+    head_seq: u32,
+}
+
+impl Recent {
+    /// The ledger state now: the checkpoint extended by the segment, the
+    /// same arithmetic validation uses (`dex_core::checkpoint`).
+    fn state(&self, props: &DexProperties) -> ExternResult<CheckpointState<ActionHash>> {
+        let mut events = Vec::new();
+        for e in &self.segment {
+            if let Some(event) = ledger_event(&e.hash, &e.entry, props)?.map_err(guest)? {
+                events.push(event);
+            }
+        }
+        let base = self.checkpoint.as_ref().map(|(_, _, s)| s.clone()).unwrap_or_else(CheckpointState::genesis);
+        base.extend(&events).map_err(|e| guest(e.to_string()))
+    }
+
+    /// Actions after the checkpoint (or since genesis).
+    fn actions_since(&self) -> usize {
+        match &self.checkpoint {
+            Some((_, seq, _)) => self.head_seq.saturating_sub(*seq) as usize,
+            None => self.head_seq as usize + 1,
         }
     }
-    CheckpointState::genesis().extend(&events).map_err(|e| guest(e.to_string()))
+}
+
+fn recent() -> ExternResult<Recent> {
+    let head_seq = agent_info()?.chain_head.1;
+    // Checkpoint actions only (no entries), to find the latest cheaply.
+    let latest = query(
+        ChainQueryFilter::new()
+            .entry_type(EntryType::try_from(UnitEntryTypes::Checkpoint)?)
+            .include_entries(false),
+    )?
+    .into_iter()
+    .max_by_key(|r| r.action().action_seq());
+    let checkpoint = match latest {
+        Some(action) => {
+            let seq = action.action().action_seq();
+            let records = query(
+                ChainQueryFilter::new()
+                    .sequence_range(ChainQueryFilterRange::ActionSeqRange(seq, seq))
+                    .include_entries(true),
+            )?;
+            match decode_own(records)?.into_iter().next() {
+                Some(OwnEntry { hash, entry: EntryTypes::Checkpoint(c), .. }) => Some((hash, seq, c.state)),
+                _ => return Err(guest("latest checkpoint could not be read")),
+            }
+        }
+        None => None,
+    };
+    let start = checkpoint.as_ref().map_or(0, |(_, seq, _)| seq + 1);
+    let segment = if start <= head_seq {
+        decode_own(query(
+            ChainQueryFilter::new()
+                .sequence_range(ChainQueryFilterRange::ActionSeqRange(start, head_seq))
+                .include_entries(true),
+        )?)?
+    } else {
+        Vec::new()
+    };
+    Ok(Recent { checkpoint, segment, head_seq })
 }
 
 /// The checkpoint the next ledger write should cite, writing a new one first
@@ -594,16 +661,13 @@ fn own_state(own: &OwnChain, props: &DexProperties) -> ExternResult<CheckpointSt
 /// actions follow the last. A checkpoint equals the author's whole-chain
 /// state, which is what validation re-derives from the previous one.
 fn checkpoint_if_due() -> ExternResult<Option<ActionHash>> {
-    let own = own_chain()?;
-    let actions_since = match own.checkpoint_seq {
-        Some(seq) => own.head_seq.saturating_sub(seq) as usize,
-        None => own.head_seq as usize + 1,
-    };
-    if own.ledger_since_checkpoint < CHECKPOINT_EVERY && actions_since < CHECKPOINT_AFTER_ACTIONS {
-        return Ok(own.latest_checkpoint);
+    let recent = recent()?;
+    let latest = recent.checkpoint.as_ref().map(|(hash, _, _)| hash.clone());
+    if recent.segment.len() < CHECKPOINT_EVERY && recent.actions_since() < CHECKPOINT_AFTER_ACTIONS {
+        return Ok(latest);
     }
-    let state = own_state(&own, &props()?)?;
-    let hash = create_entry(&EntryTypes::Checkpoint(Checkpoint { prev: own.latest_checkpoint.clone(), state }))?;
+    let state = recent.state(&props()?)?;
+    let hash = create_entry(&EntryTypes::Checkpoint(Checkpoint { prev: latest, state }))?;
     Ok(Some(hash))
 }
 
@@ -621,10 +685,6 @@ fn maker_anchor(maker: &AgentPubKey, deadline: i64) -> ExternResult<Option<Actio
     };
     let record = get_record(head)?;
     Ok((record.action().timestamp().as_micros() >= deadline).then(|| head.clone()))
-}
-
-fn collected_set(own: &OwnChain) -> BTreeSet<(ActionHash, u32)> {
-    own.collects.iter().map(|c| (c.run.clone(), c.index)).collect()
 }
 
 /// Parks of this escrow that their takers have reclaimed.
