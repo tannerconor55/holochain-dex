@@ -73,7 +73,7 @@ async fn measure(n: usize) -> Row {
         let _: ActionHash = env.dex(ALICE, "place_order", place(sell(1, 140))).await;
     }
     for escrow in &to_cancel {
-        let _: Option<RunReport> = env.call(ALICE, "run_escrow", RunEscrowInput { escrow: escrow.clone(), mode: RunMode::Release }).await;
+        let _: Vec<RunReport> = env.dex(ALICE, "cancel_order", escrow.clone()).await;
     }
     env.sync().await;
     for escrow in &to_fill {
@@ -81,7 +81,7 @@ async fn measure(n: usize) -> Row {
     }
     env.sync().await;
     for escrow in &to_fill {
-        let _: Option<RunReport> = env.call(ALICE, "run_escrow", RunEscrowInput { escrow: escrow.clone(), mode: RunMode::Fill }).await;
+        let _: Vec<RunReport> = env.dex(ALICE, "settle_order", escrow.clone()).await;
     }
     while Timestamp::now().as_micros() <= last_expiry {
         tokio::time::sleep(Duration::from_millis(250)).await;

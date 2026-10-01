@@ -115,3 +115,70 @@ async fn trade_index_links_must_match_their_run() {
     assert!(r.is_err(), "a release is not a trade");
     env.assert_supply().await;
 }
+
+/// An expiry beyond the lifetime is refused before the escrow opens: no funds
+/// are ever locked in an order that could not be listed.
+#[tokio::test(flavor = "multi_thread")]
+async fn place_order_refuses_an_expiry_beyond_the_lifetime_before_locking_funds() {
+    let env = TestEnv::new(1).await;
+    let _: ActionHash = env.call(ALICE, "mint", Amounts::new(1_000, 0)).await;
+    let terms = OrderTerms { expires_at: Timestamp::now().as_micros() + SEVEN_DAYS_US + 60_000_000, ..sell(10, 120) };
+    let refused: ConductorApiResult<ActionHash> = env.dex_fallible(ALICE, "place_order", place(terms)).await;
+    assert!(format!("{refused:?}").contains("at most 7 days"), "{refused:?}");
+    let escrows: Vec<ActionHash> = env.call(ALICE, "get_my_escrows", ()).await;
+    assert!(escrows.is_empty(), "no escrow was opened");
+    let balance = env.balance(ALICE).await;
+    assert_eq!((balance.available, balance.locked_in_escrows), (Amounts::new(1_000, 0), Amounts::ZERO));
+    // Exactly at the limit (less the time to commit) is fine.
+    let ok = OrderTerms { expires_at: Timestamp::now().as_micros() + SEVEN_DAYS_US - 60_000_000, ..sell(10, 120) };
+    let _: ActionHash = env.dex(ALICE, "place_order", place(ok)).await;
+    env.assert_supply().await;
+}
+
+/// The maker unlists an order once it closes (filled or cancelled); a
+/// partial fill stays listed. The book still checks state either way.
+#[tokio::test(flavor = "multi_thread")]
+async fn closed_orders_are_unlisted_by_their_maker() {
+    let env = TestEnv::new(2).await;
+    let _: ActionHash = env.call(ALICE, "mint", Amounts::new(3_000, 0)).await;
+    let _: ActionHash = env.call(BOB, "mint", Amounts::new(0, 10_000)).await;
+    let to_fill: ActionHash = env.dex(ALICE, "place_order", place(sell(10, 120))).await;
+    let partial: ActionHash = env.dex(ALICE, "place_order", place(sell(10, 121))).await;
+    let to_cancel: ActionHash = env.dex(ALICE, "place_order", place(sell(10, 122))).await;
+    env.sync().await;
+    let _: ActionHash = env.call(BOB, "park", park_request(&to_fill, 1_200, 10)).await;
+    let _: ActionHash = env.call(BOB, "park", park_request(&partial, 605, 5)).await;
+    env.sync().await;
+    let _: Vec<RunReport> = env.dex(ALICE, "settle_order", to_fill.clone()).await;
+    let _: Vec<RunReport> = env.dex(ALICE, "settle_order", partial.clone()).await;
+    let _: Vec<RunReport> = env.dex(ALICE, "cancel_order", to_cancel.clone()).await;
+    env.sync().await;
+
+    let listed = |escrow: ActionHash| async { env.dex::<_, Vec<ActionHash>>(BOB, "get_listing_links", escrow).await.len() };
+    assert_eq!(listed(to_fill).await, 0, "filled: unlisted");
+    assert_eq!(listed(to_cancel).await, 0, "cancelled: unlisted");
+    assert_eq!(listed(partial).await, 1, "partially filled: still listed");
+    assert_eq!(env.book(BOB).await.asks, vec![level(121, 5, 1)]);
+    env.assert_supply().await;
+}
+
+/// A maker who settles without the index link hides that trade from history
+/// and stats; settlement itself is unaffected (informational only).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_skipped_index_link_hides_the_trade_but_not_the_settlement() {
+    let env = TestEnv::new(2).await;
+    let _: ActionHash = env.call(ALICE, "mint", Amounts::new(1_000, 0)).await;
+    let _: ActionHash = env.call(BOB, "mint", Amounts::new(0, 1_200)).await;
+    let order: ActionHash = env.dex(ALICE, "place_order", place(sell(10, 120))).await;
+    env.sync().await;
+    let _: ActionHash = env.call(BOB, "park", park_request(&order, 1_200, 10)).await;
+    env.sync().await;
+    // The ledger's run alone: no dex index link.
+    let _: Option<RunReport> = env.call(ALICE, "run_escrow", RunEscrowInput { escrow: order, mode: RunMode::Fill }).await;
+    env.sync().await;
+    collect_all(&env).await;
+    assert_eq!(env.balance(BOB).await.available, Amounts::new(1_000, 0), "settled in full");
+    let trades: Vec<Trade> = env.dex(BOB, "get_recent_trades", dex_api::RecentTradesRequest { market: None, limit: 10 }).await;
+    assert!(trades.is_empty(), "the unindexed trade is not in history");
+    env.assert_supply().await;
+}

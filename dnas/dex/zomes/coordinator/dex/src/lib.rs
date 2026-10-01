@@ -181,6 +181,16 @@ pub fn get_config() -> ExternResult<DexConfig> {
 pub fn place_order(request: PlaceOrderRequest) -> ExternResult<ActionHash> {
     let (market, _) = market(request.market)?;
     let terms = request.terms;
+    // Refuse before any funds are locked: the listing would be refused anyway
+    // (and the escrow with it, in this one atomic call), but say why. The
+    // escrow's timestamp will be at or after `now`, so this is the stricter test.
+    let lifetime = max_lifetime_us()?;
+    if terms.expires_at.saturating_sub(now()?) > lifetime {
+        return Err(guest(format!(
+            "an order may last at most {} days; choose an earlier expiry",
+            lifetime / dex_core::buckets::DAY_US
+        )));
+    }
     let escrow: ActionHash = ledger("open_escrow", OpenEscrowRequest { market, terms })?;
     let day = utc_day(escrow_created_at(&escrow)?);
     list(escrow.clone(), &market, day, encode_tag(&market, &terms))?;
@@ -246,13 +256,7 @@ fn list(escrow: ActionHash, market: &MarketId, day: i64, tag: Vec<u8>) -> Extern
 /// When the caller's own escrow was written, read from their chain (this
 /// call's writes included): its UTC day picks the listing anchor.
 fn escrow_created_at(escrow: &ActionHash) -> ExternResult<i64> {
-    let records = query(
-        ChainQueryFilter::new().sequence_range(ChainQueryFilterRange::ActionHashTerminated(escrow.clone(), 0)),
-    )?;
-    records
-        .first()
-        .map(|r| r.action().timestamp().as_micros())
-        .ok_or_else(|| guest("the escrow is not on the caller's chain"))
+    own_action_timestamp(escrow)
 }
 
 /// Listing links in `market` created on `days`, deduplicated by escrow, with
@@ -367,30 +371,32 @@ fn order_view(state: EscrowState) -> Order {
 // Trade history and price data
 // ---------------------------------------------------------------------------
 //
-// Derived on every call from the ledger's runs; nothing is stored.
-//
-// Cost: one `get_links` on the market anchor (every order ever listed in the
-// market, closed ones included), then for each order that could have traded
-// in the requested window, `ledger.get_escrow_trades` (one escrow read, one
-// `get_links`, one read per run). O(orders + runs) network reads per call.
-// Orders are pruned by their listing tag's expiry: no run fills after it,
-// so an order expired before the window cannot have traded in it.
-//
-// Where a cache would go: runs are immutable once written, so a closed
-// order's trades never change; a cache of trades by run hash, re-reading
-// only open orders, would cut the per-run reads. The UI does not cache: it
-// re-reads price data at most every 30 s and on settlement signals. A network-wide
-// index (for example a per-market, per-day link to each run, written by the
-// maker with the run) would bound reads by the window instead of by the
-// market's history, but needs a new link type: an integrity change.
+// Read from the trade index: a link per sold run under a per-market, per-day
+// anchor, whose tag validation has checked against the run. Cost: one
+// `get_links` per day read, no per-trade or per-order reads.
+// - recent trades: today, then earlier days until `limit` (at most
+//   TRADE_LOOKBACK_DAYS);
+// - stats: the two days the last 24 h touch; if they hold no trade, earlier
+//   days for the last price, back TRADE_LOOKBACK_DAYS (beyond: unknown);
+// - candles: the days the range covers (at most TRADE_LOOKBACK_DAYS + 1).
+// A maker who skips the index link hides that trade from all three; it is
+// informational and never affects settlement.
 
 /// The `limit` most recent trades in a market, newest first.
 #[hdk_extern]
 pub fn get_recent_trades(request: RecentTradesRequest) -> ExternResult<Vec<Trade>> {
     let (id, _) = market(request.market)?;
-    let mut trades = market_trades(&id, None)?;
+    let limit = request.limit.min(MAX_RECENT_TRADES) as usize;
+    let today = utc_day(now()?);
+    let mut trades = Vec::new();
+    for day in (today - TRADE_LOOKBACK_DAYS..=today).rev() {
+        trades.extend(indexed_trades(&id, day)?);
+        if trades.len() >= limit {
+            break;
+        }
+    }
     dex_trades::sort_newest_first(&mut trades);
-    trades.truncate(request.limit.min(MAX_RECENT_TRADES) as usize);
+    trades.truncate(limit);
     Ok(trades)
 }
 
@@ -400,44 +406,66 @@ pub fn get_market_stats(market_id: Option<MarketId>) -> ExternResult<MarketStats
     let (id, _) = market(market_id)?;
     let now = now()?;
     let since = now.saturating_sub(dex_trades::DAY_US);
-    let recent = market_trades(&id, Some(since))?;
-    // The last price can be older than the window: only then read it all.
-    let trades = if recent.iter().any(|t| t.timestamp > since && t.timestamp <= now) {
-        recent
-    } else {
-        market_trades(&id, None)?
-    };
+    let mut trades = Vec::new();
+    for day in dex_core::buckets::days_between(since, now + 1) {
+        trades.extend(indexed_trades(&id, day)?);
+    }
+    // The last price can be older than the window: walk back for it.
+    if !trades.iter().any(|t| t.timestamp > since && t.timestamp <= now) {
+        for day in (utc_day(now) - TRADE_LOOKBACK_DAYS..utc_day(since)).rev() {
+            let found = indexed_trades(&id, day)?;
+            if !found.is_empty() {
+                trades.extend(found);
+                break;
+            }
+        }
+    }
     dex_trades::market_stats(&trades, now).map_err(|e| guest(e.to_string()))
 }
 
 /// OHLC candles for a market, oldest first; intervals with no trade have no
-/// candle.
+/// candle. The range may span at most TRADE_LOOKBACK_DAYS + 1 days.
 #[hdk_extern]
 pub fn get_candles(request: CandlesRequest) -> ExternResult<Vec<Candle>> {
     let (id, _) = market(request.market)?;
-    let trades = market_trades(&id, Some(request.from))?;
+    let days = dex_core::buckets::days_between(request.from, request.to);
+    if days.clone().count() as i64 > TRADE_LOOKBACK_DAYS + 1 {
+        return Err(guest(format!("a candle request may span at most {} days", TRADE_LOOKBACK_DAYS + 1)));
+    }
+    let mut trades = Vec::new();
+    for day in days {
+        trades.extend(indexed_trades(&id, day)?);
+    }
     dex_trades::candles(&trades, request.interval, request.from, request.to).map_err(|e| guest(e.to_string()))
 }
 
-/// Every trade in `market`, skipping orders that expired at or before
-/// `since` (they cannot have traded after it). Orders whose runs cannot be
-/// read yet are left out rather than failing the call.
-fn market_trades(market: &MarketId, since: Option<i64>) -> ExternResult<Vec<Trade>> {
-    // An order that traded after `since` was listed at most one lifetime
-    // before it; without `since`, look back TRADE_LOOKBACK_DAYS.
-    let now = now()?;
-    let from = since.unwrap_or(now - TRADE_LOOKBACK_DAYS * dex_core::buckets::DAY_US);
-    let days = utc_day(from.saturating_sub(max_lifetime_us()?))..=utc_day(now);
-    let mut trades = Vec::new();
-    for (escrow, tag) in listings(market, days)? {
-        if since.is_some_and(|s| tag.expires_at <= s) {
+/// The trades indexed under `market` on UTC `day`, deduplicated by run.
+fn indexed_trades(market: &MarketId, day: i64) -> ExternResult<Vec<Trade>> {
+    let links = get_links(
+        LinkQuery::try_new(dex_integrity::trade_anchor(market, day)?, LinkTypes::MarketTradesByDay)?,
+        GetStrategy::Network,
+    )?;
+    let mut seen = BTreeSet::new();
+    let mut out = Vec::new();
+    for link in links {
+        let Some(run) = link.target.into_action_hash() else { continue };
+        let Some(tag) = dex_core::buckets::TradeTag::decode(&link.tag.0) else { continue };
+        let Ok(escrow) = ActionHash::try_from_raw_39(tag.escrow.clone()) else { continue };
+        if !seen.insert(run.clone()) {
             continue;
         }
-        if let Ok(order) = ledger::<_, Vec<Trade>>("get_escrow_trades", escrow) {
-            trades.extend(order);
-        }
+        out.push(Trade {
+            market: *market,
+            escrow,
+            run,
+            timestamp: tag.run_ts,
+            price_per_lot: tag.price_per_lot,
+            lots: tag.lots,
+            maker_side: tag.maker_side,
+            quote: tag.lots.saturating_mul(tag.price_per_lot),
+        });
     }
-    Ok(trades)
+    Ok(out)
 }
 
 // ---------------------------------------------------------------------------
@@ -658,6 +686,12 @@ fn market_err(e: book::MarketError) -> WasmError {
 // Maker settlement
 // ---------------------------------------------------------------------------
 
+/// Settle one of the caller's orders now: fill its pending parks.
+#[hdk_extern]
+pub fn settle_order(escrow: ActionHash) -> ExternResult<Vec<RunReport>> {
+    run_until_settled(&escrow, RunMode::Fill)
+}
+
 /// Cancel an order: release its lock and refund every pending taker.
 #[hdk_extern]
 pub fn cancel_order(escrow: ActionHash) -> ExternResult<Vec<RunReport>> {
@@ -734,16 +768,23 @@ fn run_until_settled(escrow: &ActionHash, mode: RunMode) -> ExternResult<Vec<Run
             )?;
         }
         let state: EscrowState = ledger("get_escrow_state", escrow.clone())?;
+        if report.mode == RunMode::Fill && report.filled_lots > 0 {
+            index_trade(escrow, &report, &state)?;
+        }
+        let status = book::order_status(
+            state.terms.lots,
+            state.filled_lots,
+            state.terms.expires_at,
+            state.released_at.map(|t| t.as_micros()),
+            now()?,
+        );
+        if status != dex_api::OrderStatus::Open && status != dex_api::OrderStatus::Partial {
+            unlist(escrow, &state)?;
+        }
         emit_signal(DexSignal::OrderUpdated {
             escrow: escrow.clone(),
             run: report.run.clone(),
-            status: book::order_status(
-                state.terms.lots,
-                state.filled_lots,
-                state.terms.expires_at,
-                state.released_at.map(|t| t.as_micros()),
-                now()?,
-            ),
+            status,
             filled_lots: state.filled_lots,
             lots: state.terms.lots,
         })?;
@@ -754,6 +795,49 @@ fn run_until_settled(escrow: &ActionHash, mode: RunMode) -> ExternResult<Vec<Run
         }
     }
     Ok(reports)
+}
+
+/// Index a run that sold lots under its market and day. Validation checks
+/// the tag against the run, so readers can trust it without reading runs.
+fn index_trade(escrow: &ActionHash, report: &RunReport, state: &EscrowState) -> ExternResult<()> {
+    let run_ts = own_action_timestamp(&report.run)?;
+    let tag = dex_core::buckets::TradeTag {
+        price_per_lot: state.terms.price_per_lot,
+        lots: report.filled_lots,
+        maker_side: state.terms.side,
+        run_ts,
+        escrow: escrow.get_raw_39().to_vec(),
+    };
+    create_link(
+        dex_integrity::trade_anchor(&state.market, utc_day(run_ts))?,
+        report.run.clone(),
+        LinkTypes::MarketTradesByDay,
+        LinkTag::new(tag.encode()),
+    )?;
+    Ok(())
+}
+
+/// Delete a closed order's listings (an optimisation: readers still check
+/// every listed order's state, so a listing that stays only costs a read).
+fn unlist(escrow: &ActionHash, state: &EscrowState) -> ExternResult<()> {
+    let anchor = listing_anchor(&state.market, utc_day(state.opened_at.as_micros()))?;
+    for link in get_links(LinkQuery::try_new(anchor, LinkTypes::MarketToOrders)?, GetStrategy::Network)? {
+        if link.target.clone().into_action_hash().as_ref() == Some(escrow) {
+            delete_link(link.create_link_hash, GetOptions::network())?;
+        }
+    }
+    Ok(())
+}
+
+/// The timestamp of one of the caller's own actions (this call's included).
+fn own_action_timestamp(action: &ActionHash) -> ExternResult<i64> {
+    let records = query(
+        ChainQueryFilter::new().sequence_range(ChainQueryFilterRange::ActionHashTerminated(action.clone(), 0)),
+    )?;
+    records
+        .first()
+        .map(|r| r.action().timestamp().as_micros())
+        .ok_or_else(|| guest("the action is not on the caller's chain"))
 }
 
 // ---------------------------------------------------------------------------

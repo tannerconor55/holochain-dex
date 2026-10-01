@@ -51,11 +51,11 @@ export const PRESENCE_WINDOW_MS = 60_000;
 export const WAITING_AFTER_MS = 60_000;
 
 /**
- * Price data is re-read at most this often, and on settlement signals. Each
- * read walks every order ever listed in the market (see the dex zome's
- * trade-history comment), so it runs at a third of the book's pace.
+ * Price data is re-read with the book, and on settlement signals. Reads come
+ * from the per-day trade index (a few `get_links`), so they are as cheap as
+ * the book's.
  */
-export const PRICE_POLL_MS = 30_000;
+export const PRICE_POLL_MS = POLL_MS;
 
 export type ChartRange = "1h" | "24h" | "7d";
 

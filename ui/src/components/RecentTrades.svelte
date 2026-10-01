@@ -32,7 +32,7 @@
         {/each}
       </tbody>
     </table>
-    <p class="hint">Settled trades, derived from the makers' runs. Refreshes on settlement and every 30 s.</p>
+    <p class="hint">Settled trades, derived from the makers' runs. Refreshes on settlement and every 10 s.</p>
   {/if}
 </section>
 
