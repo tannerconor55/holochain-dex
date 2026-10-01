@@ -406,3 +406,40 @@ Open:
 - `maker_offline_park_is_reclaimed_after_the_deadline` failed once in five
   full runs early in the milestone and not since; its message was not
   captured then.
+
+## Milestone 4 — order-book and trade read performance — done
+
+Design and benchmark: `docs/design/read-performance.md`. Branch
+`read-performance`, from `main` fast-forwarded to `trade-history`. DNA-hash
+impacting (new DNA hash `uhC0kST4RVl7jezEw_g-y-8tnt5Bue3rb2IgcbMaGiUIROtgitQDI`).
+
+| Step | Commit | |
+|---|---|---|
+| design | `54d788b` | design doc and read-cost benchmark (baseline) |
+| 1 | `42806e8` | coordinator reads its ledger state from the latest checkpoint (write-cost fix) |
+| 2 | `a82fc15` | `dex_core::buckets`: UTC days, live listing days, lifetime, `run_sold_lots`, trade tag; `max_order_lifetime_secs` (DNA-hash impacting) |
+| 3 | `b489937` | integrity: day-bucketed listings, lifetime, author-only unlisting, validated trade index (DNA-hash impacting) |
+| 4 | `0f34276` | coordinator and UI read paths, `place_order` lifetime pre-check, unlisting on close, index writes |
+| 5 | `d1335f3` | benchmark fix (live orders outlive the build) and per-phase timing |
+| 6 | this commit | docs |
+
+| Orders listed (10 live) | Book | Stats | Candles | Recent trades |
+|---:|---:|---:|---:|---:|
+| 10 | 39 → 47 ms | 74 → 33 ms | 37 → 4 ms | 37 → 32 ms |
+| 100 | 355 → 53 ms | 478 → 5 ms | 477 → 5 ms | 487 → 4 ms |
+| 1000 | 7,236 → 196 ms | 10,454 → 23 ms | 10,562 → 24 ms | 10,565 → 23 ms |
+
+Deviations, reported when made: the lifetime rule is validated on the
+listing, not the Escrow (approved); the integrity commit carries the minimal
+coordinator glue to keep the suite green (as in milestone 2); the
+max-lifetime property and `dna.yaml` landed with the `dex_core` commit so
+the packed DNA stayed valid.
+
+Not met: building the 1000-order benchmark market took 3,818 s (3,610 s
+before). Placing an order stays cheap (155 → 267 ms from 100 to 1000 orders
+of history); a run (cancel 4.8 s, settle 5.7 s each at 1000) grows with the
+maker's history. Follow-up branch: a realistic write benchmark, profiling,
+then coordinator fixes (read only the escrow's own runs; no bucket scans).
+
+Found: the RAM-backed `/tmp` filled with conductor data from killed runs
+(disk-quota failures, an OOM kill); CLAUDE.md now says how to run and clean.

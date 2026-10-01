@@ -26,6 +26,7 @@ Spec documents: *DEX MVP Protocol v0.1* and *Smart Agreement Plan v0.1*.
 | Unyt Smart Agreement template (`unyt/dex_order_escrow`, Rhai) | Done: 4,000 generated runs identical to `dex_core::execute_run` under the published `rave_engine` 0.12.0, park deadlines included. See [Unyt port](#unyt-port). |
 | Milestone 2: taker protection, checkpoints, multi-market | Done. Design and proofs: `docs/design/taker-protection.md`. |
 | Milestone 3: trade history, price data, reliable notifications | Done. No integrity or `dna.yaml` change; the DNA hash is unchanged. |
+| Milestone 4: read performance (day-bucketed listings, 7-day order lifetime, unlisting on close, validated trade index) | Done. At 1000 listed orders: book 7.2 s → 196 ms, stats 10.5 s → 23 ms, candles 10.6 s → 24 ms. Design and benchmark: `docs/design/read-performance.md`. DNA-hash impacting. |
 
 ## Layout
 
@@ -56,7 +57,9 @@ nix develop                       # holonix 0.7 shell: rust, wasm target, hc, ho
 cargo test -p dex_core            # fast: settlement logic
 cargo test -p ledger_integrity    # fast: attack traces against validate
 ./build.sh                        # zomes -> wasm -> dex.dna -> dex.happ
-cargo test --manifest-path tests/sweettest/Cargo.toml   # conductor tests (~4 min)
+cargo test --manifest-path tests/sweettest/Cargo.toml   # conductor tests (~5 min)
+DEX_BENCH_SIZES=10,100,1000 cargo test --manifest-path tests/sweettest/Cargo.toml \
+  bench:: -- --ignored --nocapture                       # read-cost benchmark (~70 min at 1000)
 cargo test --manifest-path tests/rhai_parity/Cargo.toml # Rhai template vs dex_core (~80 s)
 ```
 
@@ -64,6 +67,16 @@ The Sweettest crate builds its dependencies with `opt-level = 3`: the
 conductor compiles every zome's wasm with Cranelift on first use, which an
 unoptimised `holochain` makes ~30 s per agent. The first build after a clean
 takes ~12 minutes; later ones only rebuild the test crate.
+
+**Test environment.** At the default thread count (one per core, 12 here)
+the Sweettest suite peaks at about 19 GB, and every conductor keeps its
+databases under `TMPDIR`. On a machine whose `/tmp` is a RAM-backed tmpfs
+that is memory too: run with `-- --test-threads=6`, or point `TMPDIR` at
+disk. A killed or crashed run never deletes its conductors' data, so it
+piles up in `/tmp/nix-shell.*` (one per `nix develop`) and later runs fail
+with "Disk quota exceeded" or are OOM-killed: delete the stale
+`nix-shell.*` directories (those no running process uses) after a killed
+run.
 
 Keep `tests/sweettest/Cargo.lock`: it is seeded from holochain 0.7.0's own
 published `Cargo.lock`, with this repo's crates added on top, so the
@@ -156,6 +169,14 @@ an exact match, like peers re-running a Unyt RAVE.
 * **Declared units and markets only**: amounts in an undeclared unit, a park
   in another market than its escrow, and a price off the market's tick are
   refused.
+* **Listings are bucketed and bounded**: a listing hangs off its market's
+  anchor for its escrow's creation day (UTC), and the escrow must expire at
+  most `max_order_lifetime_secs` after it was created. Only its maker may
+  delete a listing.
+* **The trade index cannot lie**: a trade index link must target a run by its
+  own author, hang off the anchor for its market and the run's day, and carry
+  exactly the run's price, side, timestamp, escrow and the lots it sold; index
+  links cannot be deleted.
 
 ### Units, markets and timing (DNA properties)
 
@@ -168,6 +189,7 @@ an exact match, like peers re-running a Unyt RAVE.
 | `markets` | `A/HF`, `lot_size` 100, `tick_size` 1 | base/quote (quote is always `HF`); a market's id is `blake2b-256(base, quote)`; duplicates, `base == quote`, a pair and its inverse, and zero lot or tick are refused at genesis |
 | `park_timeout_secs` | 1800 | a park's run window |
 | `settle_grace_secs` | 300 | added after the window (or after the order's expiry, if sooner) |
+| `max_order_lifetime_secs` | 604800 (7 days) | the longest an order may be listed for; `place_order` refuses a later expiry before locking any funds |
 
 Price is `price_per_lot` in quote minor units: 1.20 HF per A is `120`, a
 multiple of `tick_size`. One lot is `lot_size` base minor units (100 =
@@ -214,10 +236,17 @@ quote volume, count), and OHLC candles on epoch-aligned intervals (1 min to
 1 day, at most 1,000 per request). The ledger exposes one read,
 `get_escrow_trades`, so the dex zome still never reads ledger entries.
 
-**Read cost** grows with the market's history: every trade read walks every
-order ever listed in the market (closed ones too), then each order's runs.
-Orders whose listing expired before the requested window are skipped
-(nothing fills after expiry). Milestone 4 addresses this.
+**Where reads come from (milestone 4).** Listings hang off per-market,
+per-day anchors (the escrow's UTC creation day), and an order lives at most
+7 days, so the book reads the 8 days that can still hold a live order and
+checks each listed order's state. A maker deletes an order's listing when a
+run closes it (filled, cancelled, or released after expiry), so those days
+hold mostly open orders. After every run that sells lots the maker writes a
+trade index link under the market's anchor for the run's day; validation
+checks its tag against the run, so recent trades, stats and candles read
+only the index (one `get_links` per day: 2 for the 24 h stats, up to 8 for a
+7-day chart) and never a run. Recent trades and the last price look back 30
+days; a candle request spans at most 31 days.
 
 **Notifications** come two ways and are shown once. Signals are fast but may
 be lost: each receiving taker's `run_settled` carries how their parks came
@@ -290,10 +319,26 @@ Externs: `preview_market_order`, `market_order`, `market_order_by_budget`,
   before their node sees the run: the toast ("Trade settled") comes first,
   and the take panel, wallet and My takes catch up on a later poll (within
   10 s once gossip delivers the run).
-* **Price data refreshes every 30 s.** Recent trades, the 24 h stats and the
-  chart are re-read at most every 30 s and on settlement signals, because
-  each read walks the market's whole order history (above); a trade from an
-  order the reader has no signal for can take up to 30 s to show.
+* **The book read still grows mildly with absent makers.** Expired orders
+  whose maker never comes back to release them are never unlisted; the book
+  fetches their links (skipping them by their tag's expiry, without a state
+  read) until they fall out of the 7-day window. At 1000 orders listed in one
+  day, 330 of them expired and never released, the book read is 196 ms
+  (47 ms with 10). The 7-day lifetime bounds it.
+* **A skipped trade-index link hides that trade.** The maker writes the index
+  link; a maker whose client does not (or settles through the ledger
+  directly) leaves the trade out of recent trades, stats and candles. This is
+  informational only: settlement, balances and validation never read the
+  index.
+* **Price history looks back 30 days.** A market with no trade in 30 days
+  shows its last price as unknown.
+* **Writing a run grows with the maker's history.** Settling or cancelling
+  an order cost 0.6–0.8 s with 100 orders of history and 5–6 s with 1000 in
+  the (adversarial) benchmark; placing an order stays cheap. A follow-up
+  splits validation from coordinator cost.
+* **Price data refreshes with the book** (every 10 s) and on settlement
+  signals; a trade from an order the reader has no signal for can take up
+  to 10 s to show.
 * **Trade timestamps are the maker's.** A trade's time is its run's action
   timestamp, which the maker asserts (as Unyt's `executed_timestamp` is the
   executor's); a maker with a wrong clock misplaces their trades on the
@@ -433,6 +478,11 @@ with what the port answered:
     and who may change them?
 15. *New:* can a `ParkedSpendCredit` (spending on credit) fund a DEX order
     escrow, or only `ParkedSpendBalance`?
+16. *New:* how can a DEX integrity zome validate a trade index link that
+    points at a RAVE in the Unyt DNA? Validation cannot read across DNAs, so
+    the mock's check (the tag equals the run's trade) would need a Unyt-side
+    helper or a Unyt-side index; without one, the index on Unyt would be
+    maker-attested and unvalidated.
 
 ## DNA-hash note
 

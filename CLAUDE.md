@@ -16,7 +16,13 @@ skills.
 - `nix develop -c cargo test -p dex_core` — settlement logic unit tests
 - `nix develop -c cargo test -p ledger_integrity` — crafted-chain attack traces against the real `validate`
 - `nix develop -c ./build.sh` — build wasm, pack `dex.dna` and `dex.happ`
-- `nix develop -c cargo test --manifest-path tests/sweettest/Cargo.toml` — conductor tests (needs `./build.sh` first; ~4 min, first build ~12 min)
+- `nix develop -c cargo test --manifest-path tests/sweettest/Cargo.toml` — conductor tests (needs `./build.sh` first; ~5 min, first build ~12 min)
+  - Test env: the suite peaks at ~19 GB on 12 threads and keeps conductor databases under `TMPDIR`
+    (here a RAM-backed tmpfs): use `-- --test-threads=6`, or set `TMPDIR` on disk.
+  - After a killed or crashed run, delete stale `/tmp/nix-shell.*` directories that no running
+    process uses (`grep -l TMPDIR=/tmp/<dir> /proc/*/environ` finds none): they hold leaked conductor
+    data and make later runs fail with "Disk quota exceeded" or get OOM-killed.
+  - Read-cost benchmark (ignored by default): `DEX_BENCH_SIZES=10,100,1000 ... bench:: -- --ignored --nocapture`.
 - `nix develop -c cargo test --manifest-path tests/rhai_parity/Cargo.toml` — `unyt/dex_order_escrow` vs `dex_core` under rave_engine; rerun after any change to `execute_run` or the template
 - In `ui/`: `nix develop .. -c npm start` (two agents via hc-spin), `npm test` (Vitest),
   `npm run check` (svelte-check), `npm run e2e` (Playwright demo; starts `scripts/sandbox.sh`)

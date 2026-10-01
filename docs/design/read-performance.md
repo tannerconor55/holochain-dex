@@ -1,6 +1,8 @@
 # Order-book and trade read performance
 
-Milestone 4 design, for approval. Pinned: hdk 0.7.0, hdi 0.8.0, holochain
+**Status: approved and implemented** (milestone 4; commits in PLAN.md).
+
+Milestone 4 design. Pinned: hdk 0.7.0, hdi 0.8.0, holochain
 0.7.0; every Holochain claim below was read in that source.
 
 ## 1. The problem, measured
@@ -205,3 +207,29 @@ rerun to confirm.
 5. Rerun the benchmark; before/after table; docs.
 
 Full test suite after each commit; stop on any failure.
+
+## 8. Result
+
+Benchmark after implementation (same setup; see PLAN.md for commits):
+
+| Orders listed | Trades | Book | Stats | Candles (24 h) | Recent trades |
+|---:|---:|---:|---:|---:|---:|
+| 10 | 0 | 47 ms | 33 ms | 4 ms | 32 ms |
+| 100 | 30 | 53 ms | 5 ms | 5 ms | 4 ms |
+| 1000 | 330 | 196 ms | 23 ms | 24 ms | 23 ms |
+
+Price reads are flat. The book grows mildly: the benchmark lists all 1000
+orders on one day, and its 330 expired orders are never released by an
+absent maker, so never unlisted; the book fetches their links and skips them
+by tag. Bounded by the 7-day lifetime.
+
+Write cost was not improved: the 1000-order build took 3,818 s (3,610 s
+before). Per phase at 1000 orders of history: place 267 ms, cancel 4.8 s,
+settle 5.7 s each (at 100: 155 ms, 630 ms, 814 ms). The benchmark settles
+every order after all are placed, so a run's validation walk back to its
+escrow covers nearly the whole history; the coordinator also decodes every
+run the maker has and scans the day's listing bucket. Split and fix in the
+follow-up.
+
+The Rhai template is unchanged; the parity harness passes (31/31, 4,000
+generated runs identical).
