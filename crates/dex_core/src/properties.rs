@@ -32,6 +32,9 @@ pub struct DexProperties {
     /// order's expiry, if sooner), plus the grace.
     pub park_timeout_secs: u64,
     pub settle_grace_secs: u64,
+    /// The longest an order may be listed for: `expires_at` minus the
+    /// escrow's creation time. Bounds which listing days a book read needs.
+    pub max_order_lifetime_secs: u64,
     pub units: Vec<UnitDef>,
     pub markets: Vec<MarketDef>,
 }
@@ -46,6 +49,7 @@ pub struct Timing {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PropertiesError {
     ZeroParkTimeout,
+    ZeroOrderLifetime,
     DurationOverflow,
     NoUnits,
     BadUnitId(String),
@@ -68,6 +72,7 @@ impl core::fmt::Display for PropertiesError {
         use PropertiesError::*;
         match self {
             ZeroParkTimeout => write!(f, "park_timeout_secs must be positive"),
+            ZeroOrderLifetime => write!(f, "max_order_lifetime_secs must be positive"),
             DurationOverflow => write!(f, "a duration does not fit in microseconds"),
             NoUnits => write!(f, "no units declared"),
             BadUnitId(id) => write!(f, "unit id {id:?} must be 1-{MAX_UNIT_ID_LEN} ASCII letters, digits or '_'"),
@@ -110,6 +115,10 @@ impl DexProperties {
             return Err(PropertiesError::ZeroParkTimeout);
         }
         self.timing()?;
+        if self.max_order_lifetime_secs == 0 {
+            return Err(PropertiesError::ZeroOrderLifetime);
+        }
+        self.max_order_lifetime_us()?;
         if self.units.is_empty() {
             return Err(PropertiesError::NoUnits);
         }
@@ -172,6 +181,10 @@ impl DexProperties {
         })
     }
 
+    pub fn max_order_lifetime_us(&self) -> Result<i64, PropertiesError> {
+        secs_to_micros(self.max_order_lifetime_secs)
+    }
+
     pub fn market(&self, id: &MarketId) -> Result<&MarketDef, PropertiesError> {
         self.markets
             .iter()
@@ -197,6 +210,7 @@ impl DexProperties {
         DexProperties {
             park_timeout_secs: 30 * 60,
             settle_grace_secs: 5 * 60,
+            max_order_lifetime_secs: 7 * 86_400,
             units: vec![
                 UnitDef { id: crate::UNIT_A.into(), decimals: 2 },
                 UnitDef { id: HUB_UNIT.into(), decimals: 2 },

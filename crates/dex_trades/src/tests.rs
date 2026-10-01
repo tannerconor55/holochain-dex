@@ -57,7 +57,10 @@ fn a_buy_order_counts_lots_from_its_quote_lock() {
 #[test]
 fn a_lock_that_grows_or_is_not_whole_lots_is_refused() {
     let runs = [run(1, 1, RunMode::Fill, 6_000), run(2, 2, RunMode::Fill, 7_000)];
-    assert_eq!(trades_of_order(&0u32, &a_hf(), &sell(100, 120), &runs), Err(TradesError::LockGrew));
+    assert_eq!(
+        trades_of_order(&0u32, &a_hf(), &sell(100, 120), &runs),
+        Err(TradesError::Core(dex_core::CoreError::InconsistentLock))
+    );
     let ragged = [run(1, 1, RunMode::Fill, 6_050)];
     assert!(matches!(trades_of_order(&0u32, &a_hf(), &sell(100, 120), &ragged), Err(TradesError::Core(_))));
 }

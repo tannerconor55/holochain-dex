@@ -11,6 +11,7 @@ integrity:
   properties:
     park_timeout_secs: 1800 # a park may be settled for 30 min (or until expiry) ...
     settle_grace_secs: 300  # ... plus 5 min; after that only the taker may reclaim it
+    max_order_lifetime_secs: 604800 # 7 days: an order may be listed at most this long
     units:
       - id: A
         decimals: 2

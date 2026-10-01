@@ -25,6 +25,7 @@ use std::collections::{BTreeMap, BTreeSet};
 pub use markets::{MarketDef, MarketId};
 
 pub mod book;
+pub mod buckets;
 pub mod checkpoint;
 pub mod listing;
 pub mod markets;

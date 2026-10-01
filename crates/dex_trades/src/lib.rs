@@ -41,9 +41,9 @@ pub struct Trade<H> {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TradesError {
+    /// Includes a run's lock growing or not being whole lots
+    /// (`CoreError::InconsistentLock`).
     Core(CoreError),
-    /// A run's lock is larger than the one before it.
-    LockGrew,
     Overflow,
     /// `to` is not after `from`.
     EmptyRange,
@@ -64,7 +64,6 @@ impl core::fmt::Display for TradesError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             TradesError::Core(e) => write!(f, "{e}"),
-            TradesError::LockGrew => write!(f, "a run's lock grew"),
             TradesError::Overflow => write!(f, "arithmetic overflow"),
             TradesError::EmptyRange => write!(f, "the range must end after it starts"),
             TradesError::TooManyCandles => write!(f, "at most {MAX_CANDLES} candles per request"),
@@ -81,12 +80,12 @@ pub fn trades_of_order<H: Clone>(
     terms: &OrderTerms,
     runs: &[RunRecord<H>],
 ) -> Result<Vec<Trade<H>>, TradesError> {
-    let mut remaining = terms.lots;
+    let mut prev_locked = terms.initial_lock(market)?;
     let mut out = Vec::new();
     for r in runs {
-        let after = terms.remaining_lots(&r.locked, market)?;
-        if r.mode == RunMode::Fill {
-            let lots = remaining.checked_sub(after).ok_or(TradesError::LockGrew)?;
+        // The same rule the trade index's validation applies.
+        let lots = dex_core::buckets::run_sold_lots(terms, market, &prev_locked, &r.locked, r.mode)?;
+        {
             if lots > 0 {
                 out.push(Trade {
                     market: market.id(),
@@ -100,7 +99,7 @@ pub fn trades_of_order<H: Clone>(
                 });
             }
         }
-        remaining = after;
+        prev_locked = r.locked.clone();
     }
     Ok(out)
 }

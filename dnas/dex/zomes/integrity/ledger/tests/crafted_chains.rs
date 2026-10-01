@@ -33,6 +33,7 @@ fn props() -> DexProperties {
     DexProperties {
         park_timeout_secs: 20,
         settle_grace_secs: 5,
+        max_order_lifetime_secs: 7 * 86_400,
         units: vec![UnitDef { id: UNIT_A.into(), decimals: 2 }, UnitDef { id: HUB_UNIT.into(), decimals: 2 }],
         markets: vec![MarketDef::default_pair()],
     }

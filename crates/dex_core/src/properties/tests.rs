@@ -23,6 +23,8 @@ fn the_demo_properties_are_valid() {
 fn genesis_rules_refuse_every_listed_mistake() {
     let b = || UnitDef { id: "B".into(), decimals: 2 };
     assert_eq!(with(|p| p.park_timeout_secs = 0), Err(PropertiesError::ZeroParkTimeout));
+    assert_eq!(with(|p| p.max_order_lifetime_secs = 0), Err(PropertiesError::ZeroOrderLifetime));
+    assert_eq!(with(|p| p.max_order_lifetime_secs = u64::MAX), Err(PropertiesError::DurationOverflow));
     assert_eq!(with(|p| p.park_timeout_secs = u64::MAX), Err(PropertiesError::DurationOverflow));
     assert_eq!(with(|p| p.units.clear()), Err(PropertiesError::NoUnits));
     assert_eq!(with(|p| p.units.push(UnitDef { id: "A".into(), decimals: 2 })), Err(PropertiesError::DuplicateUnit("A".into())));
