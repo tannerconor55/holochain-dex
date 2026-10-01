@@ -465,7 +465,7 @@ async fn listing_with_a_tag_that_disagrees_with_the_escrow_is_rejected() {
     ];
     for (what, tag) in bad_tags {
         let result: ConductorApiResult<ActionHash> = env
-            .dex_fallible(ALICE, "list_escrow_raw", RawListing { escrow: escrow.clone(), tag, anchor_market: None })
+            .dex_fallible(ALICE, "list_escrow_raw", RawListing { escrow: escrow.clone(), tag, anchor_market: None, anchor_day: None })
             .await;
         assert!(result.is_err(), "a listing with the wrong {what} must be rejected");
     }
@@ -473,7 +473,7 @@ async fn listing_with_a_tag_that_disagrees_with_the_escrow_is_rejected() {
     // Control: the escrow's own tag passes, so the rejections above are about
     // the tag and the cross-zome escrow decode works.
     let _: ActionHash = env
-        .dex(ALICE, "list_escrow_raw", RawListing { escrow: escrow.clone(), tag: good, anchor_market: None })
+        .dex(ALICE, "list_escrow_raw", RawListing { escrow: escrow.clone(), tag: good, anchor_market: None, anchor_day: None })
         .await;
     env.sync().await;
     assert_eq!(env.book(BOB).await.asks, vec![level(120, 100, 1)]);
@@ -1062,3 +1062,4 @@ async fn market_sell_sweeps_bids() {
 mod protection;
 mod history;
 mod bench;
+mod buckets;

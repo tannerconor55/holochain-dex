@@ -9,7 +9,7 @@ use hdi::prelude::{ActionHash, AgentPubKey, Timestamp};
 use serde::{Deserialize, Serialize};
 
 pub use dex_core::{Amounts, OrderTerms, RunMode, Side};
-pub use entries::{Escrow, ESCROW_ENTRY_INDEX, LEDGER_INTEGRITY_ZOME};
+pub use entries::{Escrow, SettlementRun, ESCROW_ENTRY_INDEX, LEDGER_INTEGRITY_ZOME, SETTLEMENT_RUN_ENTRY_INDEX};
 
 /// Ledger entries that other integrity zomes must decode. Defined here, not in
 /// `ledger_integrity`, because depending on that crate would link its
@@ -25,6 +25,9 @@ mod entries {
     /// silently break zomes that check it.
     pub const ESCROW_ENTRY_INDEX: u8 = 1;
 
+    /// `SettlementRun`'s position, likewise asserted by `ledger_integrity`.
+    pub const SETTLEMENT_RUN_ENTRY_INDEX: u8 = 3;
+
     /// An order's escrow. Creating it locks `terms.initial_lock(market)` from the maker.
     /// The action hash of this entry is the order's identity.
     #[hdk_entry_helper]
@@ -35,6 +38,21 @@ mod entries {
         pub terms: dex_core::OrderTerms,
         /// The maker's latest checkpoint when opening (the lock is a debit).
         pub checkpoint: Option<ActionHash>,
+    }
+
+    /// One execution of an escrow's settlement logic, authored by its maker.
+    /// Here so the dex integrity zome can validate trade index links.
+    #[hdk_entry_helper]
+    #[derive(Clone, PartialEq)]
+    pub struct SettlementRun {
+        pub escrow: ActionHash,
+        /// The maker's previous run for this escrow; `None` for the first run.
+        pub prev_run: Option<ActionHash>,
+        pub mode: dex_core::RunMode,
+        /// Parks consumed, in processing (time-priority) order.
+        pub consumed: Vec<ActionHash>,
+        pub allocations: Vec<dex_core::Allocation<AgentPubKey>>,
+        pub locked: dex_core::Amounts,
     }
 }
 

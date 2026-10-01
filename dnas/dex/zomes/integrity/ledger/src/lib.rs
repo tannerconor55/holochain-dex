@@ -82,19 +82,8 @@ pub struct Park {
     pub checkpoint: Option<ActionHash>,
 }
 
-/// One execution of an escrow's settlement logic, authored by its maker.
-#[hdk_entry_helper]
-#[derive(Clone, PartialEq)]
-pub struct SettlementRun {
-    pub escrow: ActionHash,
-    /// The maker's previous run for this escrow; `None` for the first run.
-    pub prev_run: Option<ActionHash>,
-    pub mode: RunMode,
-    /// Parks consumed, in processing (time-priority) order.
-    pub consumed: Vec<ActionHash>,
-    pub allocations: Vec<Allocation<AgentPubKey>>,
-    pub locked: Amounts,
-}
+/// Defined in `ledger_api` so the dex integrity zome can decode it too.
+pub use ledger_api::SettlementRun;
 
 /// A receiver collecting one allocation of a settlement run into their balance.
 #[hdk_entry_helper]
@@ -146,6 +135,7 @@ pub enum EntryTypes {
 
 // Other integrity zomes identify escrows by this index (see `ledger_api`).
 const _: () = assert!(UnitEntryTypes::Escrow as u8 == ledger_api::ESCROW_ENTRY_INDEX);
+const _: () = assert!(UnitEntryTypes::SettlementRun as u8 == ledger_api::SETTLEMENT_RUN_ENTRY_INDEX);
 
 #[hdk_link_types]
 pub enum LinkTypes {

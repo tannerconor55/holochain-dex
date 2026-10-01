@@ -14,14 +14,15 @@ use dex_api::{
     BookView, Candle, CandlesRequest, DexConfig, DexSignal, MarketStats, RecentTradesRequest, Trade,
     MAX_RECENT_TRADES, FillChange, LevelQuery, MakerPresence, MarketAmount, MarketBudgetRequest,
     MarketInfo, MarketOrderRequest, MarketPlan, MarketPreviewRequest, MarketResult, MarketRetry, MyOrder,
-    Order, PlaceOrderRequest, PlacedPark, SignalFill, RawListing, RetryMarketRequest, TakePlan, TakeRequest,
+    Order, PlaceOrderRequest, PlacedPark, SignalFill, RawListing, RawTradeIndex, RetryMarketRequest, TakePlan, TakeRequest,
     TakeResult, DEFAULT_MAX_SLIPPAGE_BPS,
 };
 use dex_core::book;
-use dex_core::listing::{decode_tag, encode_tag};
+use dex_core::listing::{decode_tag, encode_tag, ListingTag};
 use dex_core::properties::DexProperties;
 use dex_core::{MarketDef, MarketId};
-use dex_integrity::{load_properties, market_anchor, LinkTypes};
+use dex_core::buckets::{live_listing_days, utc_day, TRADE_LOOKBACK_DAYS};
+use dex_integrity::{listing_anchor, load_properties, LinkTypes};
 use hdk::prelude::*;
 use ledger_api::{
     EscrowState, OpenEscrowRequest, ParkRequest, ParkStatus, PendingPark, RunEscrowInput, RunMode, Side,
@@ -181,7 +182,8 @@ pub fn place_order(request: PlaceOrderRequest) -> ExternResult<ActionHash> {
     let (market, _) = market(request.market)?;
     let terms = request.terms;
     let escrow: ActionHash = ledger("open_escrow", OpenEscrowRequest { market, terms })?;
-    list(escrow.clone(), &market, encode_tag(&market, &terms))?;
+    let day = utc_day(escrow_created_at(&escrow)?);
+    list(escrow.clone(), &market, day, encode_tag(&market, &terms))?;
     Ok(escrow)
 }
 
@@ -190,22 +192,92 @@ pub fn place_order(request: PlaceOrderRequest) -> ExternResult<ActionHash> {
 #[hdk_extern]
 pub fn republish_listing(escrow: ActionHash) -> ExternResult<ActionHash> {
     let state: EscrowState = ledger("get_escrow_state", escrow.clone())?;
-    list(escrow, &state.market, encode_tag(&state.market, &state.terms))
+    let day = utc_day(state.opened_at.as_micros());
+    list(escrow, &state.market, day, encode_tag(&state.market, &state.terms))
 }
 
 /// List with a caller-chosen tag. Exists to test that validation rejects any
 /// tag except the escrow's own; it cannot create a listing `place_order` could not.
 #[hdk_extern]
 pub fn list_escrow_raw(input: RawListing) -> ExternResult<ActionHash> {
-    let market = match input.anchor_market {
-        Some(market) => market,
-        None => ledger::<_, EscrowState>("get_escrow_state", input.escrow.clone())?.market,
-    };
-    list(input.escrow, &market, input.tag)
+    let state: EscrowState = ledger("get_escrow_state", input.escrow.clone())?;
+    let market = input.anchor_market.unwrap_or(state.market);
+    let day = input.anchor_day.unwrap_or_else(|| utc_day(state.opened_at.as_micros()));
+    list(input.escrow, &market, day, input.tag)
 }
 
-fn list(escrow: ActionHash, market: &MarketId, tag: Vec<u8>) -> ExternResult<ActionHash> {
-    create_link(market_anchor(market)?, escrow, LinkTypes::MarketToOrders, LinkTag::new(tag))
+/// Write a trade index link as given. Exists to test that validation rejects
+/// every index link but a run's own trade, by its maker.
+#[hdk_extern]
+pub fn index_trade_raw(input: RawTradeIndex) -> ExternResult<ActionHash> {
+    create_link(
+        dex_integrity::trade_anchor(&input.market, input.day)?,
+        input.run,
+        LinkTypes::MarketTradesByDay,
+        LinkTag::new(input.tag),
+    )
+}
+
+/// Delete a dex link by its create action. Exists to test that only a
+/// listing's maker may delete it and that index links cannot be deleted.
+#[hdk_extern]
+pub fn unlist_raw(create_link: ActionHash) -> ExternResult<ActionHash> {
+    delete_link(create_link, GetOptions::network())
+}
+
+/// The listing links (create action hashes) of an escrow, from its creation
+/// day's anchor. For tests and the maker's own unlisting.
+#[hdk_extern]
+pub fn get_listing_links(escrow: ActionHash) -> ExternResult<Vec<ActionHash>> {
+    let state: EscrowState = ledger("get_escrow_state", escrow.clone())?;
+    let anchor = listing_anchor(&state.market, utc_day(state.opened_at.as_micros()))?;
+    Ok(get_links(LinkQuery::try_new(anchor, LinkTypes::MarketToOrders)?, GetStrategy::Network)?
+        .into_iter()
+        .filter(|l| l.target.clone().into_action_hash().as_ref() == Some(&escrow))
+        .map(|l| l.create_link_hash)
+        .collect())
+}
+
+/// List `escrow` under its market's anchor for UTC day `day`.
+fn list(escrow: ActionHash, market: &MarketId, day: i64, tag: Vec<u8>) -> ExternResult<ActionHash> {
+    create_link(listing_anchor(market, day)?, escrow, LinkTypes::MarketToOrders, LinkTag::new(tag))
+}
+
+/// When the caller's own escrow was written, read from their chain (this
+/// call's writes included): its UTC day picks the listing anchor.
+fn escrow_created_at(escrow: &ActionHash) -> ExternResult<i64> {
+    let records = query(
+        ChainQueryFilter::new().sequence_range(ChainQueryFilterRange::ActionHashTerminated(escrow.clone(), 0)),
+    )?;
+    records
+        .first()
+        .map(|r| r.action().timestamp().as_micros())
+        .ok_or_else(|| guest("the escrow is not on the caller's chain"))
+}
+
+/// Listing links in `market` created on `days`, deduplicated by escrow, with
+/// their decoded tags. Readers still check every order's state.
+fn listings(market: &MarketId, days: impl Iterator<Item = i64>) -> ExternResult<Vec<(ActionHash, ListingTag)>> {
+    let mut seen = BTreeSet::new();
+    let mut out = Vec::new();
+    for day in days {
+        let links = get_links(
+            LinkQuery::try_new(listing_anchor(market, day)?, LinkTypes::MarketToOrders)?,
+            GetStrategy::Network,
+        )?;
+        for link in links {
+            let Some(escrow) = link.target.into_action_hash() else { continue };
+            let Some(tag) = decode_tag(&link.tag.0) else { continue };
+            if &tag.market == market && seen.insert(escrow.clone()) {
+                out.push((escrow, tag));
+            }
+        }
+    }
+    Ok(out)
+}
+
+fn max_lifetime_us() -> ExternResult<i64> {
+    props()?.max_order_lifetime_us().map_err(|e| guest(e.to_string()))
 }
 
 /// The DNA properties; unusable properties are an error, never a default.
@@ -260,27 +332,15 @@ fn plan(request: &TakeRequest, def: &MarketDef, orders: &[Order], now: i64) -> E
 
 /// Every live listed order in `market`.
 ///
-/// Cost: one `get_links`, then one ledger state read per listing that is not
-/// already expired by its tag (N+1). Fine at MVP scale; a cache or a
-/// maker-published summary would go here. Orders whose state cannot be read
-/// yet (not gossiped) are left out rather than failing the whole book.
+/// Cost: one `get_links` per day an order could still be live on (8 for a
+/// 7-day lifetime), then one ledger state read per listing not already
+/// expired by its tag. Orders whose state cannot be read yet (not gossiped)
+/// are left out rather than failing the whole book.
 fn load_orders(market: &MarketId, now: i64) -> ExternResult<Vec<Order>> {
-    let links = get_links(
-        LinkQuery::try_new(market_anchor(market)?, LinkTypes::MarketToOrders)?,
-        GetStrategy::Network,
-    )?;
-    let mut seen = BTreeSet::new();
     let mut orders = Vec::new();
-    for link in links {
-        let Some(escrow) = link.target.into_action_hash() else {
+    for (escrow, tag) in listings(market, live_listing_days(now, max_lifetime_us()?))? {
+        if now >= tag.expires_at {
             continue;
-        };
-        if !seen.insert(escrow.clone()) {
-            continue; // the same escrow listed twice
-        }
-        match decode_tag(&link.tag.0) {
-            Some(tag) if &tag.market == market && now < tag.expires_at => {}
-            _ => continue,
         }
         let Ok(state) = ledger::<_, EscrowState>("get_escrow_state", escrow) else {
             continue;
@@ -363,20 +423,15 @@ pub fn get_candles(request: CandlesRequest) -> ExternResult<Vec<Candle>> {
 /// `since` (they cannot have traded after it). Orders whose runs cannot be
 /// read yet are left out rather than failing the call.
 fn market_trades(market: &MarketId, since: Option<i64>) -> ExternResult<Vec<Trade>> {
-    let links = get_links(
-        LinkQuery::try_new(market_anchor(market)?, LinkTypes::MarketToOrders)?,
-        GetStrategy::Network,
-    )?;
-    let mut seen = BTreeSet::new();
+    // An order that traded after `since` was listed at most one lifetime
+    // before it; without `since`, look back TRADE_LOOKBACK_DAYS.
+    let now = now()?;
+    let from = since.unwrap_or(now - TRADE_LOOKBACK_DAYS * dex_core::buckets::DAY_US);
+    let days = utc_day(from.saturating_sub(max_lifetime_us()?))..=utc_day(now);
     let mut trades = Vec::new();
-    for link in links {
-        let Some(escrow) = link.target.into_action_hash() else { continue };
-        if !seen.insert(escrow.clone()) {
+    for (escrow, tag) in listings(market, days)? {
+        if since.is_some_and(|s| tag.expires_at <= s) {
             continue;
-        }
-        match decode_tag(&link.tag.0) {
-            Some(tag) if &tag.market == market && since.is_none_or(|s| tag.expires_at > s) => {}
-            _ => continue,
         }
         if let Ok(order) = ledger::<_, Vec<Trade>>("get_escrow_trades", escrow) {
             trades.extend(order);

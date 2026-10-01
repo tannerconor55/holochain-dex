@@ -88,6 +88,9 @@ pub struct RawListing {
     /// Hang the link off this market's anchor instead of the escrow's own.
     #[serde(default)]
     pub anchor_market: Option<dex_core::MarketId>,
+    /// ... and this UTC day's instead of the escrow's creation day.
+    #[serde(default)]
+    pub anchor_day: Option<i64>,
 }
 
 // ---------------------------------------------------------------------------
@@ -134,6 +137,16 @@ pub struct MakerPresence {
     pub reachable: bool,
     /// Why not, when not reachable.
     pub detail: Option<String>,
+}
+
+/// A trade index link with a caller-chosen base and tag. Only for testing
+/// validation, which rejects anything but the run's own trade.
+#[derive(Serialize, Deserialize, Debug)]
+pub struct RawTradeIndex {
+    pub run: ActionHash,
+    pub market: MarketId,
+    pub day: i64,
+    pub tag: Vec<u8>,
 }
 
 // ---------------------------------------------------------------------------
