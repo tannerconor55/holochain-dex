@@ -20,12 +20,20 @@
 //! the dex coordinator's own work (reads, index link, unlisting, signals).
 
 use super::*;
+use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
 
 const SAMPLE: usize = 12;
 
 #[derive(Default)]
 struct Times {
+    /// Control write: a mint (O(1) app validation).
+    mint: Vec<Duration>,
+    /// Control read: a zome call that reads nothing from the DHT.
+    noop: Vec<Duration>,
+    /// `settle_order_traced`: client total, and per-step µs inside the call.
+    traced_total: Vec<Duration>,
+    traced_steps: BTreeMap<String, Vec<i64>>,
     place: Vec<Duration>,
     plan: Vec<Duration>,
     run: Vec<Duration>,
@@ -69,17 +77,32 @@ async fn one_order(env: &TestEnv, i: usize, measure: Option<&mut Times>) {
         }
         Some(t) => {
             t.place.push(place_t);
+            let (_, mint_t): (ActionHash, _) = timed(env.call(ALICE, "mint", Amounts::new(1, 0))).await;
+            t.mint.push(mint_t);
+            let (_, noop_t): (dex_api::DexConfig, _) = timed(env.dex(ALICE, "get_config", ())).await;
+            t.noop.push(noop_t);
             let input = || RunEscrowInput { escrow: order.clone(), mode: RunMode::Fill };
             let (planned, plan_t): (Option<u64>, _) = timed(env.call(ALICE, "plan_run", input())).await;
             assert_eq!(planned, Some(1), "the park is pending");
             t.plan.push(plan_t);
-            // Alternate which path settles, so both are timed at this history.
-            if t.run.len() <= t.settle.len() {
-                let (_, run_t): (Option<RunReport>, _) = timed(env.call(ALICE, "run_escrow", input())).await;
-                t.run.push(run_t);
-            } else {
-                let (_, settle_t): (Vec<RunReport>, _) = timed(env.dex(ALICE, "settle_order", order.clone())).await;
-                t.settle.push(settle_t);
+            // Rotate which path settles, so each is timed at this history.
+            match i % 3 {
+                0 => {
+                    let (_, run_t): (Option<RunReport>, _) = timed(env.call(ALICE, "run_escrow", input())).await;
+                    t.run.push(run_t);
+                }
+                1 => {
+                    let (_, settle_t): (Vec<RunReport>, _) = timed(env.dex(ALICE, "settle_order", order.clone())).await;
+                    t.settle.push(settle_t);
+                }
+                _ => {
+                    let (steps, total): (Vec<(String, i64)>, _) =
+                        timed(env.dex(ALICE, "settle_order_traced", order.clone())).await;
+                    t.traced_total.push(total);
+                    for (step, us) in steps {
+                        t.traced_steps.entry(step).or_default().push(us);
+                    }
+                }
             }
         }
     }
@@ -108,6 +131,18 @@ async fn write_cost_by_history_when_orders_settle_as_they_arrive() {
             one_order(&env, done + k, Some(&mut t)).await;
         }
         done += SAMPLE;
+        let inside: i64 = t.traced_steps.values().map(|v| v.iter().sum::<i64>() / v.len().max(1) as i64).sum();
+        eprintln!(
+            "writes: history {at}: traced settle {} ms total, {} ms inside the call (outer validation + flush ≈ the rest); steps (ms): {}",
+            mean(&t.traced_total),
+            inside / 1000,
+            t.traced_steps
+                .iter()
+                .map(|(k, v)| format!("{k} {}", v.iter().sum::<i64>() / v.len().max(1) as i64 / 1000))
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+        eprintln!("writes: history {at}: control mint {} ms, no-op call {} ms", mean(&t.mint), mean(&t.noop));
         eprintln!(
             "writes: history {at}: place {} ms, plan {} ms, run {} ms, settle {} ms, cancel {} ms ({:.0} s so far)",
             mean(&t.place),

@@ -692,6 +692,32 @@ pub fn settle_order(escrow: ActionHash) -> ExternResult<Vec<RunReport>> {
     run_until_settled(&escrow, RunMode::Fill)
 }
 
+/// Test-only: `settle_order`, returning how long each step took inside this
+/// zome call, as `(step, microseconds)`. The caller's total minus their sum
+/// is this call's own inline validation and flush (profiling, see
+/// `docs/design/write-performance.md`).
+#[hdk_extern]
+pub fn settle_order_traced(escrow: ActionHash) -> ExternResult<Vec<(String, i64)>> {
+    TRACE.with(|t| t.borrow_mut().clear());
+    mark("start")?;
+    run_until_settled(&escrow, RunMode::Fill)?;
+    mark("end")?;
+    let marks = TRACE.with(|t| t.borrow().clone());
+    Ok(marks.windows(2).map(|w| (w[1].0.to_string(), w[1].1 - w[0].1)).collect())
+}
+
+thread_local! {
+    /// Profiling marks for `settle_order_traced`; cleared at its start.
+    static TRACE: std::cell::RefCell<Vec<(&'static str, i64)>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// Record a profiling mark (a `sys_time` call; negligible).
+fn mark(step: &'static str) -> ExternResult<()> {
+    let at = now()?;
+    TRACE.with(|t| t.borrow_mut().push((step, at)));
+    Ok(())
+}
+
 /// Cancel an order: release its lock and refund every pending taker.
 #[hdk_extern]
 pub fn cancel_order(escrow: ActionHash) -> ExternResult<Vec<RunReport>> {
@@ -708,8 +734,10 @@ pub fn cancel_order(escrow: ActionHash) -> ExternResult<Vec<RunReport>> {
 #[hdk_extern]
 pub fn run_my_orders() -> ExternResult<Vec<RunReport>> {
     let now = now()?;
-    let mut reports = Vec::new();
+    // Read every order before any run writes: each ledger call made after a
+    // write would re-validate this call's writes so far.
     let escrows: Vec<ActionHash> = ledger("get_my_escrows", ())?;
+    let mut due = Vec::new();
     for escrow in escrows {
         let state: EscrowState = ledger("get_escrow_state", escrow.clone())?;
         let pending: Vec<PendingPark> = ledger("get_pending_parks", escrow.clone())?;
@@ -724,7 +752,11 @@ pub fn run_my_orders() -> ExternResult<Vec<RunReport>> {
         } else {
             RunMode::Fill
         };
-        reports.extend(run_until_settled(&escrow, mode)?);
+        due.push((escrow, mode, (pending, state)));
+    }
+    let mut reports = Vec::new();
+    for (escrow, mode, read) in due {
+        reports.extend(run_until_settled_from(&escrow, mode, Some(read))?);
     }
     Ok(reports)
 }
@@ -733,11 +765,34 @@ pub fn run_my_orders() -> ExternResult<Vec<RunReport>> {
 /// Each run's receivers other than the caller are told to collect, with how
 /// their own parks came out; the caller's UI is told the order's new status.
 fn run_until_settled(escrow: &ActionHash, mode: RunMode) -> ExternResult<Vec<RunReport>> {
+    run_until_settled_from(escrow, mode, None)
+}
+
+/// `run_until_settled`, using `read` (pending parks and state, read before
+/// this call wrote anything) for the first run instead of reading again.
+fn run_until_settled_from(
+    escrow: &ActionHash,
+    mode: RunMode,
+    mut read: Option<(Vec<PendingPark>, EscrowState)>,
+) -> ExternResult<Vec<RunReport>> {
     let me = my_key()?;
     let mut reports = Vec::new();
     for _ in 0..MAX_RUNS_PER_CALL {
+        // Every ledger read happens before the run writes. A nested zome call
+        // re-validates everything written earlier in this call (Holochain runs
+        // inline validation at the end of each nested call too), so a read
+        // after the write would validate the run and its links again.
         // Who parked what, read before the run consumes it.
-        let pending: Vec<PendingPark> = ledger("get_pending_parks", escrow.clone())?;
+        let (pending, before) = match read.take() {
+            Some(read) => read,
+            None => {
+                let pending: Vec<PendingPark> = ledger("get_pending_parks", escrow.clone())?;
+                mark("ledger.get_pending_parks")?;
+                let before: EscrowState = ledger("get_escrow_state", escrow.clone())?;
+                mark("ledger.get_escrow_state (before the run)")?;
+                (pending, before)
+            }
+        };
         let report: Option<RunReport> = ledger(
             "run_escrow",
             RunEscrowInput {
@@ -745,6 +800,7 @@ fn run_until_settled(escrow: &ActionHash, mode: RunMode) -> ExternResult<Vec<Run
                 mode,
             },
         )?;
+        mark("ledger.run_escrow (incl. its inline validation)")?;
         // `None`: a fill with nothing pending.
         let Some(report) = report else { break };
         for receiver in report.receivers.iter().filter(|r| **r != me) {
@@ -767,26 +823,24 @@ fn run_until_settled(escrow: &ActionHash, mode: RunMode) -> ExternResult<Vec<Run
                 vec![receiver.clone()],
             )?;
         }
-        let state: EscrowState = ledger("get_escrow_state", escrow.clone())?;
+        mark("signals")?;
+        let run_ts = own_action_timestamp(&report.run)?;
         if report.mode == RunMode::Fill && report.filled_lots > 0 {
-            index_trade(escrow, &report, &state)?;
+            index_trade(escrow, &report, &before, run_ts)?;
         }
-        let status = book::order_status(
-            state.terms.lots,
-            state.filled_lots,
-            state.terms.expires_at,
-            state.released_at.map(|t| t.as_micros()),
-            now()?,
-        );
+        mark("index link")?;
+        let (filled_lots, released_at) = after_run(&before, &report, run_ts)?;
+        let status = book::order_status(before.terms.lots, filled_lots, before.terms.expires_at, released_at, now()?);
         if status != dex_api::OrderStatus::Open && status != dex_api::OrderStatus::Partial {
-            unlist(escrow, &state)?;
+            unlist(escrow, &before)?;
         }
+        mark("unlist")?;
         emit_signal(DexSignal::OrderUpdated {
             escrow: escrow.clone(),
             run: report.run.clone(),
             status,
-            filled_lots: state.filled_lots,
-            lots: state.terms.lots,
+            filled_lots,
+            lots: before.terms.lots,
         })?;
         let done = report.still_pending == 0;
         reports.push(report);
@@ -797,10 +851,27 @@ fn run_until_settled(escrow: &ActionHash, mode: RunMode) -> ExternResult<Vec<Run
     Ok(reports)
 }
 
+/// The order's filled lots and release time after `report`'s run, from its
+/// state before it, as `ledger.get_escrow_state` would report them: lots
+/// still unfilled when the order is first released were returned to the
+/// maker, not sold.
+fn after_run(before: &EscrowState, report: &RunReport, run_ts: i64) -> ExternResult<(u64, Option<i64>)> {
+    if let Some(released) = before.released_at {
+        return Ok((before.filled_lots, Some(released.as_micros())));
+    }
+    match report.mode {
+        RunMode::Fill => {
+            let (_, def) = market(Some(before.market))?;
+            let remaining = before.terms.remaining_lots(&report.locked, &def).map_err(core_err)?;
+            Ok((before.terms.lots.saturating_sub(remaining), None))
+        }
+        RunMode::Release => Ok((before.terms.lots.saturating_sub(before.remaining_lots), Some(run_ts))),
+    }
+}
+
 /// Index a run that sold lots under its market and day. Validation checks
 /// the tag against the run, so readers can trust it without reading runs.
-fn index_trade(escrow: &ActionHash, report: &RunReport, state: &EscrowState) -> ExternResult<()> {
-    let run_ts = own_action_timestamp(&report.run)?;
+fn index_trade(escrow: &ActionHash, report: &RunReport, state: &EscrowState, run_ts: i64) -> ExternResult<()> {
     let tag = dex_core::buckets::TradeTag {
         price_per_lot: state.terms.price_per_lot,
         lots: report.filled_lots,
