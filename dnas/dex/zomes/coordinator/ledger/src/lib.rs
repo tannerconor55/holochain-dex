@@ -84,6 +84,37 @@ pub fn park(request: ParkRequest) -> ExternResult<ActionHash> {
 /// fails validation; calling again resolves it.
 #[hdk_extern]
 pub fn run_escrow(input: RunEscrowInput) -> ExternResult<Option<RunReport>> {
+    let Some(prepared) = prepare_run(&input)? else { return Ok(None) };
+    let PreparedRun { run_input, output, prev_run, pending_count } = prepared;
+    let run = SettlementRun {
+        escrow: input.escrow.clone(),
+        prev_run,
+        mode: input.mode,
+        consumed: output.consumed.clone(),
+        allocations: output.allocations.clone(),
+        locked: output.locked.clone(),
+    };
+    commit_run(input, run, output, pending_count, run_input.parks.len())
+}
+
+/// Test-only: everything `run_escrow` does before writing (reads, park
+/// selection, `execute_run`), and nothing after. Profiling `run_escrow`
+/// against this splits the coordinator's cost from the commit and its
+/// validation. Returns the lots the run would fill.
+#[hdk_extern]
+pub fn plan_run(input: RunEscrowInput) -> ExternResult<Option<u64>> {
+    Ok(prepare_run(&input)?.map(|p| p.output.filled_lots))
+}
+
+/// A run worked out but not written.
+struct PreparedRun {
+    run_input: RunInput<ActionHash, AgentPubKey>,
+    output: dex_core::RunOutput<ActionHash, AgentPubKey>,
+    prev_run: Option<ActionHash>,
+    pending_count: usize,
+}
+
+fn prepare_run(input: &RunEscrowInput) -> ExternResult<Option<PreparedRun>> {
     let me = my_key()?;
     let (escrow_record, escrow) = get_escrow(&input.escrow)?;
     if escrow_record.action().author() != &me {
@@ -136,15 +167,16 @@ pub fn run_escrow(input: RunEscrowInput) -> ExternResult<Option<RunReport>> {
         mode: input.mode,
     };
     let output = execute_run(&run_input).map_err(core_err)?;
+    Ok(Some(PreparedRun { run_input, output, prev_run, pending_count }))
+}
 
-    let run = SettlementRun {
-        escrow: input.escrow.clone(),
-        prev_run,
-        mode: input.mode,
-        consumed: output.consumed.clone(),
-        allocations: output.allocations.clone(),
-        locked: output.locked.clone(),
-    };
+fn commit_run(
+    input: RunEscrowInput,
+    run: SettlementRun,
+    output: dex_core::RunOutput<ActionHash, AgentPubKey>,
+    pending_count: usize,
+    taken: usize,
+) -> ExternResult<Option<RunReport>> {
     let run_hash = create_entry(&EntryTypes::SettlementRun(run))?;
     create_link(input.escrow, run_hash.clone(), LinkTypes::EscrowToRuns, ())?;
     for allocation in &output.allocations {
@@ -170,7 +202,7 @@ pub fn run_escrow(input: RunEscrowInput) -> ExternResult<Option<RunReport>> {
             })
             .collect(),
         locked: output.locked,
-        still_pending: pending_count - run_input.parks.len(),
+        still_pending: pending_count - taken,
         receivers: output.allocations.iter().map(|a| a.receiver.clone()).collect(),
     }))
 }
