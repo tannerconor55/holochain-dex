@@ -379,6 +379,14 @@ pub fn get_escrow_state(escrow: ActionHash) -> ExternResult<EscrowState> {
     })
 }
 
+/// An escrow's state and its pending parks in one call: what a settle needs
+/// before it runs. One local zome call instead of two (each costs a fixed
+/// overhead in the conductor; see `docs/design/write-performance.md`).
+#[hdk_extern]
+pub fn get_order_context(escrow: ActionHash) -> ExternResult<(EscrowState, Vec<PendingPark>)> {
+    Ok((get_escrow_state(escrow.clone())?, get_pending_parks(escrow)?))
+}
+
 /// Parks against an escrow that no run has consumed yet, oldest first.
 #[hdk_extern]
 pub fn get_pending_parks(escrow: ActionHash) -> ExternResult<Vec<PendingPark>> {

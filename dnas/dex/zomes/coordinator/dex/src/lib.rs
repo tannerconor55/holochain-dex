@@ -739,8 +739,7 @@ pub fn run_my_orders() -> ExternResult<Vec<RunReport>> {
     let escrows: Vec<ActionHash> = ledger("get_my_escrows", ())?;
     let mut due = Vec::new();
     for escrow in escrows {
-        let state: EscrowState = ledger("get_escrow_state", escrow.clone())?;
-        let pending: Vec<PendingPark> = ledger("get_pending_parks", escrow.clone())?;
+        let (state, pending): (EscrowState, Vec<PendingPark>) = ledger("get_order_context", escrow.clone())?;
         let expired = state.terms.is_expired_at(now);
         let mode = if state.closed || expired {
             if state.closed && pending.is_empty() {
@@ -786,10 +785,8 @@ fn run_until_settled_from(
         let (pending, before) = match read.take() {
             Some(read) => read,
             None => {
-                let pending: Vec<PendingPark> = ledger("get_pending_parks", escrow.clone())?;
-                mark("ledger.get_pending_parks")?;
-                let before: EscrowState = ledger("get_escrow_state", escrow.clone())?;
-                mark("ledger.get_escrow_state (before the run)")?;
+                let (before, pending): (EscrowState, Vec<PendingPark>) = ledger("get_order_context", escrow.clone())?;
+                mark("ledger.get_order_context (before the run)")?;
                 (pending, before)
             }
         };
