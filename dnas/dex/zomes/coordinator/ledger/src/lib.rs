@@ -126,9 +126,9 @@ fn prepare_run(input: &RunEscrowInput) -> ExternResult<Option<PreparedRun>> {
     let timing = props.timing().map_err(|e| guest(e.to_string()))?;
     let now = sys_time()?.as_micros();
 
-    // Our own chain is authoritative for our runs: read them locally (all
-    // our runs, not the whole chain).
-    let mine = own_runs()?;
+    // Our own chain is authoritative for our runs: read them locally, and
+    // only after the escrow (a run always follows its escrow), not every run.
+    let mine = own_runs_since(escrow_record.action().action_seq())?;
     let mut my_runs: Vec<&(ActionHash, u32, SettlementRun)> =
         mine.iter().filter(|(_, _, r)| r.escrow == input.escrow).collect();
     my_runs.sort_by_key(|(_, seq, _)| std::cmp::Reverse(*seq));
@@ -598,6 +598,29 @@ fn own_of(unit: UnitEntryTypes) -> ExternResult<Vec<OwnEntry>> {
 /// The caller's runs as `(hash, action_seq, run)`, oldest first.
 fn own_runs() -> ExternResult<Vec<(ActionHash, u32, SettlementRun)>> {
     Ok(own_of(UnitEntryTypes::SettlementRun)?
+        .into_iter()
+        .filter_map(|e| match e.entry {
+            EntryTypes::SettlementRun(r) => Some((e.hash, e.seq, r)),
+            _ => None,
+        })
+        .collect())
+}
+
+/// The caller's runs written after action `seq`, oldest first: a
+/// type-filtered query over that range only, so its cost is the runs since
+/// then, not the whole history.
+fn own_runs_since(seq: u32) -> ExternResult<Vec<(ActionHash, u32, SettlementRun)>> {
+    let head = agent_info()?.chain_head.1;
+    if seq >= head {
+        return Ok(Vec::new());
+    }
+    let records = query(
+        ChainQueryFilter::new()
+            .sequence_range(ChainQueryFilterRange::ActionSeqRange(seq + 1, head))
+            .entry_type(EntryType::try_from(UnitEntryTypes::SettlementRun)?)
+            .include_entries(true),
+    )?;
+    Ok(decode_own(records)?
         .into_iter()
         .filter_map(|e| match e.entry {
             EntryTypes::SettlementRun(r) => Some((e.hash, e.seq, r)),

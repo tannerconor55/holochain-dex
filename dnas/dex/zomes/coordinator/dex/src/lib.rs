@@ -819,25 +819,53 @@ fn index_trade(escrow: &ActionHash, report: &RunReport, state: &EscrowState) -> 
 
 /// Delete a closed order's listings (an optimisation: readers still check
 /// every listed order's state, so a listing that stays only costs a read).
+///
+/// The maker's own listing links are found on their own chain (link actions
+/// after the escrow, headers only), so this never scans the day's listing
+/// bucket, however many orders it holds.
 fn unlist(escrow: &ActionHash, state: &EscrowState) -> ExternResult<()> {
-    let anchor = listing_anchor(&state.market, utc_day(state.opened_at.as_micros()))?;
-    for link in get_links(LinkQuery::try_new(anchor, LinkTypes::MarketToOrders)?, GetStrategy::Network)? {
-        if link.target.clone().into_action_hash().as_ref() == Some(escrow) {
-            delete_link(link.create_link_hash, GetOptions::network())?;
+    let anchor = AnyLinkableHash::from(listing_anchor(&state.market, utc_day(state.opened_at.as_micros()))?);
+    let target = AnyLinkableHash::from(escrow.clone());
+    let head = agent_info()?.chain_head.1;
+    let since = own_action(escrow)?.action().action_seq();
+    if since >= head {
+        return Ok(());
+    }
+    let actions = query(
+        ChainQueryFilter::new()
+            .sequence_range(ChainQueryFilterRange::ActionSeqRange(since, head))
+            .include_entries(false),
+    )?;
+    let mut listings = Vec::new();
+    let mut deleted = BTreeSet::new();
+    for record in &actions {
+        match &record.action().data {
+            ActionData::CreateLink(c) if c.base_address == anchor && c.target_address == target => {
+                listings.push(record.action_address().clone());
+            }
+            ActionData::DeleteLink(d) => {
+                deleted.insert(d.link_add_address.clone());
+            }
+            _ => {}
         }
+    }
+    for listing in listings.into_iter().filter(|l| !deleted.contains(l)) {
+        delete_link(listing, GetOptions::local())?;
     }
     Ok(())
 }
 
+/// One of the caller's own actions (this call's included).
+fn own_action(action: &ActionHash) -> ExternResult<Record> {
+    query(ChainQueryFilter::new().sequence_range(ChainQueryFilterRange::ActionHashTerminated(action.clone(), 0)))?
+        .into_iter()
+        .next()
+        .ok_or_else(|| guest("the action is not on the caller's chain"))
+}
+
 /// The timestamp of one of the caller's own actions (this call's included).
 fn own_action_timestamp(action: &ActionHash) -> ExternResult<i64> {
-    let records = query(
-        ChainQueryFilter::new().sequence_range(ChainQueryFilterRange::ActionHashTerminated(action.clone(), 0)),
-    )?;
-    records
-        .first()
-        .map(|r| r.action().timestamp().as_micros())
-        .ok_or_else(|| guest("the action is not on the caller's chain"))
+    Ok(own_action(action)?.action().timestamp().as_micros())
 }
 
 // ---------------------------------------------------------------------------
