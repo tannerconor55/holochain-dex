@@ -41,7 +41,8 @@ fn props() -> DexProperties {
 
 #[derive(Clone, Default)]
 struct Dht {
-    records: HashMap<ActionHash, Record>,
+    /// Shared so `set_hdi` (once per verdict) clones a pointer, not the map.
+    records: std::sync::Arc<HashMap<ActionHash, Record>>,
     properties: Vec<u8>,
 }
 
@@ -167,7 +168,7 @@ fn hash36(tag: u8, n: u32) -> Vec<u8> {
 impl World {
     fn new() -> Self {
         let properties = holochain_serialized_bytes::encode(&props()).expect("properties encode");
-        World { dht: Dht { records: HashMap::new(), properties }, next: 1 }
+        World { dht: Dht { records: std::sync::Arc::new(HashMap::new()), properties }, next: 1 }
     }
 
     fn fresh(&mut self) -> u32 {
@@ -185,7 +186,7 @@ impl World {
             data: ActionData::Dna(DnaData { dna_hash: DnaHash::from_raw_36(vec![0xdd; 36]) }),
         };
         let record = Record::new(signed(action, hash.clone()), RecordEntry::NA);
-        self.dht.records.insert(hash.clone(), record);
+        std::sync::Arc::make_mut(&mut self.dht.records).insert(hash.clone(), record);
         Chain { author, head: hash, seq: 0, ts }
     }
 
@@ -224,7 +225,7 @@ impl World {
         chain.head = hash.clone();
         chain.seq = record.action().action_seq();
         chain.ts = record.action().timestamp().as_micros();
-        self.dht.records.insert(hash.clone(), record);
+        std::sync::Arc::make_mut(&mut self.dht.records).insert(hash.clone(), record);
         hash
     }
 
@@ -433,7 +434,7 @@ impl Scene {
         let mut escrowed = Amounts::ZERO;
         let mut parked = Amounts::ZERO;
         let mut back = Amounts::ZERO;
-        for (hash, record) in &self.w.dht.records {
+        for (hash, record) in self.w.dht.records.iter() {
             match ledger_integrity::decode_record(record).expect("decodes") {
                 Some(EntryTypes::Escrow(e)) => {
                     let initial = e.terms.initial_lock(&MarketDef::default_pair()).expect("lock");
@@ -753,4 +754,99 @@ fn reclaim_link_must_hang_off_the_parks_escrow() {
     assert!(is_valid(&s.w.verdict(&good)));
     let bad = link(s.park.clone().into(), &s.taker, 2);
     assert_invalid(&s.w.verdict(&bad), "park's escrow");
+}
+
+// ---------------------------------------------------------------------------
+// Validation cost vs history (ignored: a measurement, not a check)
+// ---------------------------------------------------------------------------
+
+/// Native timing of the real `validate` on a maker chain of N mints, with a
+/// checkpoint every 32 entries as the coordinator writes them: an escrow (a
+/// debit: walks the segment since the checkpoint), a checkpoint, and a run of
+/// a fresh order (walks back to its escrow). Native Rust, so faster than the
+/// conductor's wasm; what matters is whether it grows with N.
+///
+/// `nix develop -c cargo test -p ledger_integrity --release --test crafted_chains validation_cost -- --ignored --nocapture`
+#[test]
+#[ignore = "measurement: run explicitly"]
+fn validation_cost_by_history() {
+    use dex_core::checkpoint::{CheckpointState, LedgerEvent};
+    use ledger_integrity::Checkpoint;
+    use std::time::Instant;
+
+    fn time(w: &World, record: &Record) -> (std::time::Duration, ValidateCallbackResult) {
+        let reps = 200;
+        let mut verdict = ValidateCallbackResult::Valid;
+        let t = Instant::now();
+        for _ in 0..reps {
+            verdict = w.verdict(record);
+        }
+        (t.elapsed() / reps, verdict)
+    }
+
+    println!("\n| Entries of history | Escrow (debit) | Checkpoint | Run (fresh order) |");
+    println!("|---:|---:|---:|---:|");
+    for n in [100usize, 250, 500, 1000] {
+        let mut w = World::new();
+        let mut maker = w.agent(1, T0);
+        let mut taker = w.agent(2, T0);
+        let mut ts = T0 + SEC;
+        let mut state: CheckpointState<ActionHash> = CheckpointState::genesis();
+        let mut checkpoint: Option<ActionHash> = None;
+        for i in 0..n {
+            ts += 1_000;
+            let amounts = Amounts::new(100, 0);
+            w.write(&mut maker, ts, EntryTypes::Mint(Mint { amounts: amounts.clone() }));
+            state = state.extend(&[LedgerEvent::Mint(amounts)]).expect("extend");
+            if (i + 1) % 32 == 0 {
+                ts += 1_000;
+                let cp = EntryTypes::Checkpoint(Checkpoint { prev: checkpoint.clone(), state: state.clone() });
+                checkpoint = Some(w.write(&mut maker, ts, cp));
+            }
+        }
+        w.write(&mut taker, T0 + SEC, EntryTypes::Mint(Mint { amounts: Amounts::new(0, 12_000) }));
+        let terms = OrderTerms { side: Side::Sell, price_per_lot: 120, lots: 100, expires_at: T0 + 3_600 * SEC };
+        let escrow_entry = || EntryTypes::Escrow(Escrow { market: MarketDef::default_pair().id(), terms, checkpoint: checkpoint.clone() });
+
+        // Escrow: the draft at the head, then commit it.
+        ts += 1_000;
+        let draft = w.draft(&maker, ts, &escrow_entry());
+        let (escrow_t, v) = time(&w, &draft);
+        assert!(is_valid(&v), "{v:?}");
+        let escrow = w.commit(&mut maker, draft);
+
+        // A checkpoint at the head (the escrow is in its segment).
+        let lock = terms.initial_lock(&MarketDef::default_pair()).expect("lock");
+        let cp_state = state.extend(&[LedgerEvent::Escrow(lock)]).expect("extend");
+        let cp = w.draft(&maker, ts + 1, &EntryTypes::Checkpoint(Checkpoint { prev: checkpoint.clone(), state: cp_state }));
+        let (cp_t, v) = time(&w, &cp);
+        assert!(is_valid(&v), "{v:?}");
+
+        // A park, then the maker's run on this fresh order.
+        let park = w.write(
+            &mut taker,
+            ts + 2,
+            EntryTypes::Park(Park {
+                escrow: escrow.clone(),
+                market: MarketDef::default_pair().id(),
+                amounts: Amounts::new(0, 4_800),
+                requested_lots: 40,
+                checkpoint: None,
+            }),
+        );
+        let mut s = Scene {
+            w,
+            maker,
+            taker,
+            escrow,
+            park,
+            deadline: ts + 2 + 25 * SEC,
+            minted: Amounts::ZERO,
+        };
+        let run_entry = s.run_entry(ts + 3, &[s.park.clone()]);
+        let run = s.w.draft(&s.maker, ts + 3, &run_entry);
+        let (run_t, v) = time(&s.w, &run);
+        assert!(is_valid(&v), "{v:?}");
+        println!("| {n} | {:?} | {:?} | {:?} |", escrow_t, cp_t, run_t);
+    }
 }
