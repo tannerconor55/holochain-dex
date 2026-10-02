@@ -443,3 +443,26 @@ then coordinator fixes (read only the escrow's own runs; no bucket scans).
 
 Found: the RAM-backed `/tmp` filled with conductor data from killed runs
 (disk-quota failures, an OOM kill); CLAUDE.md now says how to run and clean.
+
+## Follow-up — run-write performance — done (MVP target met)
+
+Branch `write-performance` (on `main` = `v0.4-read-performance`).
+Design and numbers: `docs/design/write-performance.md`; issue for the
+Holochain team: `docs/design/holochain-issue-call-overhead.md`.
+
+| Commit | |
+|---|---|
+| `b0852af` | realistic write benchmark (orders settled as they arrive) and the `plan_run` probe |
+| `99da9e3` | `run_escrow` reads only the runs since the escrow; unlisting from the maker's own chain |
+| `d117fbe` | write-up of the coordinator fixes and options |
+| `6051a87` | native `validate()` timings: flat in history |
+| `1967fb4` | every ledger read before a settle writes (one fewer validation pass); traced settles, control mint and no-op timings |
+| `e043531` | order state and pending parks in one ledger call |
+| this commit | docs |
+
+Settle / cancel at 1000 orders of history: 1,862 / 1,889 ms → 1,317 /
+1,130 ms (MVP target ~1.5 s met). The rest is per-call conductor overhead
+that grows with the chain (a no-op call 16 → 125 ms); no validation change
+was needed or made. Open: the Holochain issue; optional validation savings
+(heavy checks only on the `CreateRecord` op; DNA-hash impacting); the
+take-after-listing gossip race (retry works).

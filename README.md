@@ -332,10 +332,19 @@ Externs: `preview_market_order`, `market_order`, `market_order_by_budget`,
   index.
 * **Price history looks back 30 days.** A market with no trade in 30 days
   shows its last price as unknown.
-* **Writing a run grows with the maker's history.** Settling or cancelling
-  an order cost 0.6–0.8 s with 100 orders of history and 5–6 s with 1000 in
-  the (adversarial) benchmark; placing an order stays cheap. A follow-up
-  splits validation from coordinator cost.
+* **Writes slow as the maker's history grows.** With orders settled as they
+  arrive (`tests/sweettest/src/writes.rs`), a settle takes ~0.25 s at 100
+  orders of history and ~1.3 s at 1000, a cancel ~1.1 s, placing an order
+  ~0.85 s. Our validation is flat (microseconds, measured natively); the
+  growth is per-call overhead in the Holochain 0.7 conductor (a call doing
+  no DHT work: 16 ms → 125 ms), reported in
+  `docs/design/holochain-issue-call-overhead.md`. The coordinator avoids
+  ledger reads after a write, because each nested call re-validates the
+  call's earlier writes (`docs/design/write-performance.md`).
+* **A take right after an order appears can fail and need a retry.** The
+  taker's park is validated against the maker's escrow on the taker's own
+  node; until gossip delivers it there, the take fails with "may be
+  retried" (DepMissingFromDht). Trying again a moment later works.
 * **Price data refreshes with the book** (every 10 s) and on settlement
   signals; a trade from an order the reader has no signal for can take up
   to 10 s to show.

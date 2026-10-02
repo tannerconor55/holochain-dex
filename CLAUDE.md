@@ -23,6 +23,9 @@ skills.
     process uses (`grep -l TMPDIR=/tmp/<dir> /proc/*/environ` finds none): they hold leaked conductor
     data and make later runs fail with "Disk quota exceeded" or get OOM-killed.
   - Read-cost benchmark (ignored by default): `DEX_BENCH_SIZES=10,100,1000 ... bench:: -- --ignored --nocapture`.
+  - Write-cost benchmark (ignored; ~3 h to 1000): `DEX_WRITE_BENCH_MAX=1000 ... writes:: -- --ignored --nocapture`.
+  - Holochain runs inline validation at the end of every zome call, nested `call`s included, over
+    all of the outer call's writes: in coordinators, do ledger reads before writing.
 - `nix develop -c cargo test --manifest-path tests/rhai_parity/Cargo.toml` — `unyt/dex_order_escrow` vs `dex_core` under rave_engine; rerun after any change to `execute_run` or the template
 - In `ui/`: `nix develop .. -c npm start` (two agents via hc-spin), `npm test` (Vitest),
   `npm run check` (svelte-check), `npm run e2e` (Playwright demo; starts `scripts/sandbox.sh`)

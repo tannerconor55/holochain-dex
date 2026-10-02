@@ -1,7 +1,9 @@
 # Run-write performance (follow-up to milestone 4)
 
-Status: coordinator fixes done; options below are for approval. No
-validation change has been made.
+Status: measured (option 1 done); the conductor dominates; coordinator-only
+reductions done; **MVP acceptance met** (settle 1,317 ms, cancel 1,130 ms at
+1000 orders of history, target ~1.5 s). No validation change. Issue for the
+Holochain team: `holochain-issue-call-overhead.md`.
 
 ## Measured (realistic case)
 
@@ -99,3 +101,80 @@ validation now are.
 Do (1) first: two benchmark additions and a native validation timing, a
 few hours of runtime, no zome change. Then decide between (2), (3) and (4)
 on data rather than guesses.
+
+## Option 1 results (measure first)
+
+**Native `validate()`** (crafted chains, release build; ignored test
+`validation_cost_by_history` in `ledger_integrity/tests/crafted_chains.rs`):
+
+| Entries of history | Escrow (debit) | Checkpoint | Run (fresh order) |
+|---:|---:|---:|---:|
+| 100 | 12 µs | 13 µs | 13 µs |
+| 250 | 37 µs | 38 µs | 14 µs |
+| 500 | 29 µs | 29 µs | 13 µs |
+| 1000 | 17 µs | 18 µs | 13 µs |
+
+Flat in history (escrow and checkpoint vary with the segment since the last
+checkpoint, 0–32 entries). Our validation logic is bounded and microseconds.
+
+**Holochain 0.7 source: nested `call()`s share the workspace but each runs
+inline validation.** A local `call` passes the caller's workspace to the
+callee (`host_fn/call.rs`: `call_zome_with_workspace`), so ledger writes
+made from the dex zome commit together with the dex zome's own writes, in
+one flush at the end of the outer call (`call_zome_workflow.rs`: the flush
+is gated on `is_root_zome_call`). But `inline_validation` runs at the end of
+**every** call, nested or not, over **all** scratch records so far; and each
+`Create` is validated once per op type (`CreateRecord`, `CreateEntry`,
+`AgentActivity`). A settle used to validate its run in three passes (end of
+`run_escrow`, end of the `get_escrow_state` read after it, the outer call),
+twice per pass.
+
+**Control write and no-op call, and the traced settle**, after restructuring
+(`1967fb4`: every ledger read before the run writes):
+
+| Orders of history | No-op call | Control mint | Place | Settle | Cancel |
+|---:|---:|---:|---:|---:|---:|
+| 100 | 16 ms | 74 ms | 219 ms | 246 ms | 234 ms |
+| 250 | 37 ms | 106 ms | 308 ms | 392 ms | 412 ms |
+| 500 | 67 ms | 181 ms | 492 ms | 631 ms | 669 ms |
+| 1000 | 125 ms | 353 ms | 849 ms | 1,317 ms | 1,130 ms |
+
+Inside one settle at 1000 (traced): the nested `run_escrow` with its inline
+validation 545 ms, the two pre-run reads 83 + 72 ms, the index link 89 ms,
+unlisting 131 ms; the outer call's own validation and flush the remaining
+~380 ms of the 1,303 ms.
+
+**Verdict: the conductor dominates.** A call that does no DHT or chain work
+grows 8× from 100 to 1000 orders of history (16 → 125 ms), the control
+mint ~5×, and every step of a settle in proportion, while our validation is
+flat. Per-call overhead in the conductor grows with the chain / DHT; we have
+not found its cause in the 0.7.0 source (the chain-head lookup is a
+`max(seq)` query; an author's own call skips the cap-grant lookup).
+
+## Option 2 done (coordinator-only)
+
+- `1967fb4`: no ledger call after a run writes (removes a validation pass
+  of the run and its links); `run_my_orders` reads every order before
+  running any.
+- `e043531`: the order's state and pending parks in one ledger call
+  (`get_order_context`) instead of two. Measured to 500 orders of history:
+  the read 47 ms instead of 47 + 39; settle 631 → 609 ms, cancel 669 →
+  635 ms (100: 246 → 238, 234 → 199; 250: 392 → 372, 412 → 395).
+
+Not done, with reasons: a settle's actions (run, `EscrowToRuns`, one
+`AgentToIncomingRuns` per receiver, the trade index link, the listing
+delete) are each needed; dropping the maker's own incoming-run link would
+bring back an O(runs) read in `collect_all`. Placing an order needs its
+nested ledger write by design (the ledger owns escrows).
+
+## What remains
+
+- Per-call conductor overhead growing with history: reported to Holochain
+  (`holochain-issue-call-overhead.md`).
+- Validation options (DNA-hash impacting, not needed for the MVP target):
+  do the heavy checks only for the `CreateRecord` op (not again for
+  `CreateEntry`) to halve inline validation per pass; carry segment entry
+  hashes in checkpoints to avoid a `must_get_entry` per entry.
+- Known race: right after an order appears, a take can fail with
+  "DepMissingFromDht ... may be retried" until the escrow reaches the
+  taker's node; retrying works (seen once in Playwright).
